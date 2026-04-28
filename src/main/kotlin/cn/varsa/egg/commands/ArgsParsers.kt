@@ -3,6 +3,8 @@ package cn.varsa.egg.commands
 import cn.varsa.cli.core.CliException
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
+import cn.varsa.egg.github.ThreadPullRequest
+import cn.varsa.egg.github.ThreadPushRequest
 
 object ReplyArgsParser {
   fun parse(args: Array<String>): ReplyRequest {
@@ -72,6 +74,50 @@ object PrFeedbackArgsParser {
 
     if (pr == null) throw CliException("Usage: egg gh pr feedback [--repo owner/name] <pr-number>", 2)
     return repo to pr
+  }
+}
+
+object ThreadPullArgsParser {
+  fun parse(args: Array<String>): ThreadPullRequest {
+    var repo: String? = null
+    var pr: String? = null
+    var json = false
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--repo" -> repo = optionValue(args, ++idx, "--repo")
+        "--pr" -> pr = optionValue(args, ++idx, "--pr")
+        "--json" -> json = true
+        else -> throw CliException("Unknown option: $arg", 2)
+      }
+      idx++
+    }
+
+    return ThreadPullRequest(repo = repo, pr = pr, json = json)
+  }
+}
+
+object ThreadPushArgsParser {
+  fun parse(args: Array<String>, entityJson: String): ThreadPushRequest {
+    var repo: String? = null
+    var pr: String? = null
+    var dryRun = false
+    var json = false
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--repo" -> repo = optionValue(args, ++idx, "--repo")
+        "--pr" -> pr = optionValue(args, ++idx, "--pr")
+        "--dry-run" -> dryRun = true
+        "--json" -> json = true
+        else -> throw CliException("Unknown option: $arg", 2)
+      }
+      idx++
+    }
+
+    return ThreadPushRequest(repo = repo, pr = pr, dryRun = dryRun, json = json, entityJson = entityJson)
   }
 }
 

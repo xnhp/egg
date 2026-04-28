@@ -14,6 +14,7 @@ repositories {
 dependencies {
   implementation(kotlin("stdlib"))
   implementation("cn.varsa:cli-core:0.1.0-SNAPSHOT")
+  implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
   testImplementation(kotlin("test"))
 }
 

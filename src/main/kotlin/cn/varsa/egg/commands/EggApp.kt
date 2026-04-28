@@ -4,6 +4,7 @@ import cn.varsa.cli.core.CliArgs
 import cn.varsa.cli.core.CliCompletion
 import cn.varsa.cli.core.CliCommandGroup
 import cn.varsa.cli.core.CliDsl
+import cn.varsa.cli.core.CliException
 import cn.varsa.egg.git.GitApi
 import cn.varsa.egg.github.GitHubApi
 import cn.varsa.egg.output.Output
@@ -13,7 +14,8 @@ class EggApp(
   private val gitHubApi: GitHubApi,
   private val gitApi: GitApi,
   private val output: Output,
-  private val workingDirProvider: () -> Path = { Path.of(".").toAbsolutePath().normalize() }
+  private val workingDirProvider: () -> Path = { Path.of(".").toAbsolutePath().normalize() },
+  private val stdinProvider: () -> String = { System.`in`.bufferedReader().readText() }
 ) {
   fun commandTree(): CliCommandGroup = CliDsl.group(
     name = "egg",
@@ -84,6 +86,7 @@ class EggApp(
     children = listOf(
       currentPrGroup(),
       commentGroup(),
+      threadGroup(),
       outputLeaf(
         name = "checks",
         description = "Show PR checks for given repo/pr",
@@ -161,6 +164,31 @@ class EggApp(
         handler = { wd, args ->
           val request = ResolveArgsParser.parse(args)
           gitHubApi.resolveReviewComments(wd, request)
+        }
+      )
+    )
+  )
+
+  private fun threadGroup() = CliDsl.group(
+    name = "thread",
+    description = "Review thread sync operations",
+    children = listOf(
+      outputLeaf(
+        name = "pull",
+        description = "Pull PR review threads as sync entities",
+        handler = { wd, args ->
+          val request = ThreadPullArgsParser.parse(args)
+          gitHubApi.prThreadPull(wd, request)
+        }
+      ),
+      actionLeaf(
+        name = "push",
+        description = "Push one thread sync entity from stdin",
+        handler = { wd, args ->
+          val request = ThreadPushArgsParser.parse(args, stdinProvider())
+          val result = gitHubApi.prThreadPush(wd, request)
+          output.println(result.payload)
+          if (result.exitCode != 0) throw CliException("", result.exitCode)
         }
       )
     )

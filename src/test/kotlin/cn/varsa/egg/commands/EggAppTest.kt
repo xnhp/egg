@@ -5,6 +5,9 @@ import cn.varsa.egg.git.GitApi
 import cn.varsa.egg.github.GitHubApi
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
+import cn.varsa.egg.github.ThreadPullRequest
+import cn.varsa.egg.github.ThreadPushRequest
+import cn.varsa.egg.github.ThreadPushResult
 import cn.varsa.egg.output.BufferedOutput
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -93,13 +96,48 @@ class EggAppTest {
     assertEquals(listOf("look\nlook-web\npr\nsearch\nsearch-prs"), output.lines())
   }
 
+  @Test
+  fun `thread pull forwards args to github api`() {
+    val fakeApi = FakeGitHubApi(threadPullResult = "{\"threads\":[]}")
+    val output = BufferedOutput()
+    val app = EggApp(gitHubApi = fakeApi, gitApi = NoopGitApi(), output = output)
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("gh", "pr", "thread", "pull", "--repo", "octo/repo", "--pr", "12", "--json"))
+
+    assertEquals(0, exitCode)
+    assertEquals(listOf("{\"threads\":[]}"), output.lines())
+    assertEquals(ThreadPullRequest(repo = "octo/repo", pr = "12", json = true), fakeApi.lastThreadPullRequest)
+  }
+
+  @Test
+  fun `thread push prints payload and exits with api exit code`() {
+    val fakeApi = FakeGitHubApi(threadPushResult = ThreadPushResult(payload = "{\"status\":\"conflict\"}", exitCode = 3))
+    val output = BufferedOutput()
+    val app = EggApp(
+      gitHubApi = fakeApi,
+      gitApi = NoopGitApi(),
+      output = output,
+      stdinProvider = { "{\"_sync\":{\"id\":\"T\",\"base\":\"sha256:abc\"},\"repo\":\"octo/repo\",\"prNumber\":1,\"thread\":{\"id\":\"T\",\"isResolved\":false,\"comments\":[]}}" }
+    )
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("gh", "pr", "thread", "push", "--dry-run", "--json"))
+
+    assertEquals(3, exitCode)
+    assertEquals(listOf("{\"status\":\"conflict\"}"), output.lines())
+    assertEquals(true, fakeApi.lastThreadPushRequest?.dryRun)
+  }
+
   private class FakeGitHubApi(
     private val prId: String = "1",
     private val prUrl: String = "https://example.test/pr/1",
     private val replyResult: String = "ok",
-    private val resolveResult: String = "ok"
+    private val resolveResult: String = "ok",
+    private val threadPullResult: String = "{\"threads\":[]}",
+    private val threadPushResult: ThreadPushResult = ThreadPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0)
   ) : GitHubApi {
     var lastReplyRequest: ReplyRequest? = null
+    var lastThreadPullRequest: ThreadPullRequest? = null
+    var lastThreadPushRequest: ThreadPushRequest? = null
 
     override fun currentPrId(workingDir: java.nio.file.Path): String = prId
 
@@ -123,6 +161,16 @@ class EggAppTest {
     }
 
     override fun resolveReviewComments(workingDir: java.nio.file.Path, request: ResolveRequest): String = resolveResult
+
+    override fun prThreadPull(workingDir: java.nio.file.Path, request: ThreadPullRequest): String {
+      lastThreadPullRequest = request
+      return threadPullResult
+    }
+
+    override fun prThreadPush(workingDir: java.nio.file.Path, request: ThreadPushRequest): ThreadPushResult {
+      lastThreadPushRequest = request
+      return threadPushResult
+    }
 
     override fun searchPrs(workingDir: java.nio.file.Path, issueKey: String): String = "[]"
 
