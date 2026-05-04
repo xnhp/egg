@@ -38,7 +38,8 @@ class EggApp(
   private fun completeLeaf() = CliDsl.output(
     name = "__complete",
     description = "Internal completion helper",
-    print = output::println
+    print = output::println,
+    mixinStandardHelpOptions = true
   ) { args ->
     CliCompletion.suggest(commandTree(), args.toList()).joinToString("\n")
   }
@@ -310,7 +311,12 @@ class EggApp(
     name: String,
     description: String,
     handler: (Path, Array<String>) -> String
-  ) = CliDsl.output(name = name, description = description, print = output::println) { args ->
+  ) = CliDsl.output(
+    name = name,
+    description = description,
+    print = output::println,
+    mixinStandardHelpOptions = true
+  ) { args ->
     handler(workingDirProvider(), args)
   }
 
@@ -324,7 +330,11 @@ class EggApp(
     name: String,
     description: String,
     handler: (Path, Array<String>) -> Unit
-  ) = CliDsl.action(name = name, description = description) { args ->
+  ) = CliDsl.action(
+    name = name,
+    description = description,
+    mixinStandardHelpOptions = true
+  ) { args ->
     handler(workingDirProvider(), args)
   }
 

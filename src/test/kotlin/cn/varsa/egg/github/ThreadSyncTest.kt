@@ -36,7 +36,9 @@ class ThreadSyncTest {
 
     val delta = ThreadDeltaDeriver.derive(remote, local)
 
+    assertEquals(emptyList(), delta.deletedCommentIds)
     assertEquals(listOf("new reply"), delta.appendedBodies)
+    assertEquals(emptyList(), delta.visibilityOps)
     assertEquals(ResolutionOpType.RESOLVE, delta.resolutionOp)
   }
 
@@ -46,12 +48,51 @@ class ThreadSyncTest {
     val local = remote.copy(isResolved = false)
     val delta = ThreadDeltaDeriver.derive(remote, local)
 
+    assertEquals(emptyList(), delta.deletedCommentIds)
     assertEquals(emptyList(), delta.appendedBodies)
+    assertEquals(emptyList(), delta.visibilityOps)
     assertEquals(ResolutionOpType.UNRESOLVE, delta.resolutionOp)
 
     val noop = ThreadDeltaDeriver.derive(remote, remote)
+    assertEquals(emptyList(), noop.deletedCommentIds)
     assertEquals(emptyList(), noop.appendedBodies)
+    assertEquals(emptyList(), noop.visibilityOps)
     assertEquals(null, noop.resolutionOp)
+  }
+
+  @Test
+  fun `delta derive treats missing local metadata as equivalent for existing comments`() {
+    val remote = baseThread(
+      comments = listOf(
+        ThreadCommentSnapshot(
+          id = 101,
+          author = "alice",
+          body = "root",
+          createdAt = "2026-01-01T00:00:00Z",
+          updatedAt = "2026-01-01T00:00:00Z",
+          url = "https://example.test/c/101"
+        )
+      )
+    )
+    val local = remote.copy(
+      comments = listOf(
+        ThreadCommentSnapshot(
+          id = null,
+          author = null,
+          body = "root",
+          createdAt = null,
+          updatedAt = null,
+          url = null
+        )
+      )
+    )
+
+    val delta = ThreadDeltaDeriver.derive(remote, local)
+
+    assertEquals(emptyList(), delta.deletedCommentIds)
+    assertEquals(emptyList(), delta.appendedBodies)
+    assertEquals(emptyList(), delta.visibilityOps)
+    assertEquals(null, delta.resolutionOp)
   }
 
   @Test
@@ -66,7 +107,7 @@ class ThreadSyncTest {
   }
 
   @Test
-  fun `delta derive rejects deletion of existing comment`() {
+  fun `delta derive supports deletion of existing comment by id`() {
     val remote = baseThread(
       comments = listOf(
         ThreadCommentSnapshot(1, "alice", "a", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", null),
@@ -75,8 +116,61 @@ class ThreadSyncTest {
     )
     val local = remote.copy(comments = listOf(remote.comments.first()))
 
-    val error = assertFailsWith<CliException> { ThreadDeltaDeriver.derive(remote, local) }
-    assertEquals(2, error.exitCode)
+    val delta = ThreadDeltaDeriver.derive(remote, local)
+
+    assertEquals(listOf(2L), delta.deletedCommentIds)
+    assertEquals(emptyList(), delta.appendedBodies)
+    assertEquals(emptyList(), delta.visibilityOps)
+    assertEquals(null, delta.resolutionOp)
+  }
+
+  @Test
+  fun `delta derive supports minimize and unminimize operations`() {
+    val remote = baseThread(
+      comments = listOf(
+        ThreadCommentSnapshot(
+          id = 1,
+          author = "alice",
+          body = "a",
+          createdAt = "2026-01-01T00:00:00Z",
+          updatedAt = "2026-01-01T00:00:00Z",
+          url = null,
+          minimizedReason = null,
+          minimizedReasonSet = true,
+          nodeId = "NODE_1"
+        ),
+        ThreadCommentSnapshot(
+          id = 2,
+          author = "bob",
+          body = "b",
+          createdAt = "2026-01-01T00:01:00Z",
+          updatedAt = "2026-01-01T00:01:00Z",
+          url = null,
+          minimizedReason = "OUTDATED",
+          minimizedReasonSet = true,
+          nodeId = "NODE_2"
+        )
+      )
+    )
+    val local = remote.copy(
+      comments = listOf(
+        remote.comments[0].copy(minimizedReason = "OFF_TOPIC", minimizedReasonSet = true),
+        remote.comments[1].copy(minimizedReason = null, minimizedReasonSet = true)
+      )
+    )
+
+    val delta = ThreadDeltaDeriver.derive(remote, local)
+
+    assertEquals(emptyList(), delta.deletedCommentIds)
+    assertEquals(emptyList(), delta.appendedBodies)
+    assertEquals(
+      listOf(
+        CommentVisibilityOp(commentId = 1, type = CommentVisibilityOpType.MINIMIZE, reason = "OFF_TOPIC"),
+        CommentVisibilityOp(commentId = 2, type = CommentVisibilityOpType.UNMINIMIZE, reason = null)
+      ),
+      delta.visibilityOps
+    )
+    assertEquals(null, delta.resolutionOp)
   }
 
   @Test
