@@ -55,6 +55,11 @@ data class ThreadPushResult(
   val exitCode: Int
 )
 
+private data class CreatedThreadReply(
+  val reviewId: Int?,
+  val pullNumber: Int?
+)
+
 interface GitHubApi {
   fun currentPrId(workingDir: Path): String
   fun currentPrUrl(workingDir: Path): String
@@ -281,6 +286,39 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
       val remote = fetchThreadById(workingDir, local.syncId)
       val remoteFingerprint = ThreadSyncFingerprint.compute(remote.thread)
       if (remoteFingerprint != local.syncBase) {
+        val deltaOnCurrent = try {
+          ThreadDeltaDeriver.derive(remote.thread, local.thread)
+        } catch (e: CliException) {
+          if (e.exitCode == 2) {
+            return result(
+              status = "invalid",
+              exitCode = 2,
+              syncId = local.syncId,
+              repo = local.repo,
+              prNumber = local.prNumber,
+              operations = emptyList(),
+              message = e.message ?: "Push failed"
+            )
+          }
+          null
+        }
+        if (
+          deltaOnCurrent != null &&
+          deltaOnCurrent.deletedCommentIds.isEmpty() &&
+          deltaOnCurrent.appendedBodies.isEmpty() &&
+          deltaOnCurrent.visibilityOps.isEmpty() &&
+          deltaOnCurrent.resolutionOp == null
+        ) {
+          return result(
+            status = "noop",
+            exitCode = 0,
+            syncId = local.syncId,
+            repo = local.repo,
+            prNumber = local.prNumber,
+            operations = emptyList(),
+            message = "Remote changed since baseline; local intent already applied"
+          )
+        }
         return result(
           status = "conflict",
           exitCode = 3,
@@ -294,10 +332,30 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
       val delta = ThreadDeltaDeriver.derive(remote.thread, local.thread)
       val operations = mutableListOf<JsonObject>()
+      if (delta.deletedCommentIds.isNotEmpty()) {
+        operations += buildJsonObject {
+          put("type", "delete-comment")
+          put("count", delta.deletedCommentIds.size)
+        }
+      }
       if (delta.appendedBodies.isNotEmpty()) {
         operations += buildJsonObject {
           put("type", "reply")
           put("count", delta.appendedBodies.size)
+        }
+      }
+      val minimizeCount = delta.visibilityOps.count { it.type == CommentVisibilityOpType.MINIMIZE }
+      if (minimizeCount > 0) {
+        operations += buildJsonObject {
+          put("type", "minimize-comment")
+          put("count", minimizeCount)
+        }
+      }
+      val unminimizeCount = delta.visibilityOps.count { it.type == CommentVisibilityOpType.UNMINIMIZE }
+      if (unminimizeCount > 0) {
+        operations += buildJsonObject {
+          put("type", "unminimize-comment")
+          put("count", unminimizeCount)
         }
       }
       if (delta.resolutionOp == ResolutionOpType.RESOLVE) {
@@ -320,8 +378,26 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
       }
 
       if (!request.dryRun) {
+        delta.deletedCommentIds.forEach { commentId ->
+          deleteThreadComment(workingDir, local.repo, commentId)
+        }
+        val reviewsToSubmit = mutableSetOf<Pair<Int, Int>>()
         delta.appendedBodies.forEach { body ->
-          addThreadReply(workingDir, local.syncId, body)
+          val createdReply = addThreadReply(workingDir, local.syncId, body)
+          val reviewId = createdReply.reviewId
+          if (reviewId != null) {
+            val pullNumber = createdReply.pullNumber ?: local.prNumber
+            reviewsToSubmit += pullNumber to reviewId
+          }
+        }
+        reviewsToSubmit.forEach { (pullNumber, reviewId) ->
+          submitPullRequestReviewComment(workingDir, local.repo, pullNumber, reviewId)
+        }
+        delta.visibilityOps.forEach { op ->
+          when (op.type) {
+            CommentVisibilityOpType.MINIMIZE -> minimizeThreadComment(workingDir, remote.thread, op.commentId, op.reason!!)
+            CommentVisibilityOpType.UNMINIMIZE -> unminimizeThreadComment(workingDir, remote.thread, op.commentId)
+          }
         }
         when (delta.resolutionOp) {
           ResolutionOpType.RESOLVE -> resolveThread(workingDir, local.syncId)
@@ -438,7 +514,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   private fun fetchReviewThreadsForPr(workingDir: Path, repo: String, prNumber: String): List<ThreadSnapshot> {
     val (owner, name) = splitRepo(repo)
-    val query = "query(${'$'}owner:String!,${'$'}name:String!,${'$'}number:Int!,${'$'}after:String){repository(owner:${'$'}owner,name:${'$'}name){pullRequest(number:${'$'}number){reviewThreads(first:100,after:${'$'}after){nodes{id isResolved isOutdated path line comments(first:100){nodes{databaseId body createdAt updatedAt url author{login}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}"
+    val query = "query(${'$'}owner:String!,${'$'}name:String!,${'$'}number:Int!,${'$'}after:String){repository(owner:${'$'}owner,name:${'$'}name){pullRequest(number:${'$'}number){reviewThreads(first:100,after:${'$'}after){nodes{id isResolved isOutdated path line comments(first:100){nodes{id databaseId body createdAt updatedAt url isMinimized minimizedReason author{login}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}"
     val threadNodes = mutableListOf<JsonObject>()
     var after: String? = null
     while (true) {
@@ -491,7 +567,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
   )
 
   private fun fetchThreadById(workingDir: Path, syncId: String): RemoteThreadRef {
-    val query = "query(${'$'}id:ID!){node(id:${'$'}id){... on PullRequestReviewThread{id isResolved isOutdated path line pullRequest{number repository{nameWithOwner}} comments(first:100){nodes{databaseId body createdAt updatedAt url author{login}} pageInfo{hasNextPage endCursor}}}}}"
+    val query = "query(${'$'}id:ID!){node(id:${'$'}id){... on PullRequestReviewThread{id isResolved isOutdated path line pullRequest{number repository{nameWithOwner}} comments(first:100){nodes{id databaseId body createdAt updatedAt url isMinimized minimizedReason author{login}} pageInfo{hasNextPage endCursor}}}}}"
     val response = processRunner.runCaptureOrThrow(
       workingDir,
       listOf("gh", "api", "graphql", "-f", "query=$query", "-F", "id=$syncId")
@@ -520,7 +596,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
     hasNextPage: Boolean,
     endCursor: String?
   ): List<ThreadCommentSnapshot> {
-    val query = "query(${'$'}id:ID!,${'$'}after:String){node(id:${'$'}id){... on PullRequestReviewThread{comments(first:100,after:${'$'}after){nodes{databaseId body createdAt updatedAt url author{login}} pageInfo{hasNextPage endCursor}}}}}"
+    val query = "query(${'$'}id:ID!,${'$'}after:String){node(id:${'$'}id){... on PullRequestReviewThread{comments(first:100,after:${'$'}after){nodes{id databaseId body createdAt updatedAt url isMinimized minimizedReason author{login}} pageInfo{hasNextPage endCursor}}}}}"
     val comments = initialComments.map { parseComment(it.jsonObject) }.toMutableList()
     var next = hasNextPage
     var cursor = endCursor
@@ -600,13 +676,18 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   private fun parseComment(commentObj: JsonObject): ThreadCommentSnapshot {
     val id = commentObj.pathLong("databaseId") ?: commentObj.pathLong("id")
+    val minimizedReason = commentObj.pathString("minimizedReason")
+    val minimizedReasonSet = commentObj.containsKey("minimizedReason")
     return ThreadCommentSnapshot(
       id = id,
       author = commentObj.pathObject("author")?.pathString("login") ?: commentObj.pathString("author"),
       body = commentObj.pathString("body"),
       createdAt = commentObj.pathString("createdAt"),
       updatedAt = commentObj.pathString("updatedAt"),
-      url = commentObj.pathString("url")
+      url = commentObj.pathString("url"),
+      minimizedReason = minimizedReason,
+      minimizedReasonSet = minimizedReasonSet,
+      nodeId = commentObj.pathString("id") ?: commentObj.pathString("nodeId")
     )
   }
 
@@ -634,6 +715,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
               if (comment.createdAt != null) put("createdAt", comment.createdAt) else put("createdAt", JsonNull)
               if (comment.updatedAt != null) put("updatedAt", comment.updatedAt) else put("updatedAt", JsonNull)
               if (comment.url != null) put("url", comment.url) else put("url", JsonNull)
+              if (comment.minimizedReason != null) put("minimizedReason", comment.minimizedReason) else put("minimizedReason", JsonNull)
             })
           }
         })
@@ -641,11 +723,32 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
     }
   }
 
-  private fun addThreadReply(workingDir: Path, threadId: String, body: String) {
-    val mutation = "mutation(${'$'}threadId:ID!,${'$'}body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:${'$'}threadId,body:${'$'}body}){comment{id}}}"
-    processRunner.runCaptureOrThrow(
+  private fun addThreadReply(workingDir: Path, threadId: String, body: String): CreatedThreadReply {
+    val mutation = "mutation(${'$'}threadId:ID!,${'$'}body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:${'$'}threadId,body:${'$'}body}){comment{id pullRequestReview{databaseId} pullRequest{number}}}}"
+    val response = processRunner.runCaptureOrThrow(
       workingDir,
       listOf("gh", "api", "graphql", "-f", "query=$mutation", "-F", "threadId=$threadId", "-F", "body=$body")
+    )
+    val root = json.parseToJsonElement(response).jsonObject
+    val comment = root.pathObject("data", "addPullRequestReviewThreadReply", "comment")
+      ?: throw CliException("Thread reply mutation response missing comment", 1)
+    return CreatedThreadReply(
+      reviewId = comment.pathInt("pullRequestReview", "databaseId"),
+      pullNumber = comment.pathInt("pullRequest", "number")
+    )
+  }
+
+  private fun submitPullRequestReviewComment(workingDir: Path, repo: String, pullNumber: Int, reviewId: Int) {
+    processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("gh", "api", "-X", "POST", "repos/$repo/pulls/$pullNumber/reviews/$reviewId/events", "-f", "event=COMMENT")
+    )
+  }
+
+  private fun deleteThreadComment(workingDir: Path, repo: String, commentId: Long) {
+    processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("gh", "api", "-X", "DELETE", "repos/$repo/pulls/comments/$commentId")
     )
   }
 
@@ -657,6 +760,26 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
   private fun unresolveThread(workingDir: Path, threadId: String) {
     val mutation = "mutation(${'$'}threadId:ID!){unresolveReviewThread(input:{threadId:${'$'}threadId}){thread{id isResolved}}}"
     processRunner.runCaptureOrThrow(workingDir, listOf("gh", "api", "graphql", "-f", "query=$mutation", "-F", "threadId=$threadId"))
+  }
+
+  private fun minimizeThreadComment(workingDir: Path, remoteThread: ThreadSnapshot, commentId: Long, reason: String) {
+    val subjectId = remoteThread.comments.firstOrNull { it.id == commentId }?.nodeId
+      ?: throw CliException("Cannot minimize comment $commentId: missing node id", 2)
+    val mutation = "mutation(${'$'}subjectId:ID!,${'$'}classifier:ReportedContentClassifiers!){minimizeComment(input:{subjectId:${'$'}subjectId,classifier:${'$'}classifier}){minimizedComment{isMinimized minimizedReason}}}"
+    processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("gh", "api", "graphql", "-f", "query=$mutation", "-F", "subjectId=$subjectId", "-F", "classifier=$reason")
+    )
+  }
+
+  private fun unminimizeThreadComment(workingDir: Path, remoteThread: ThreadSnapshot, commentId: Long) {
+    val subjectId = remoteThread.comments.firstOrNull { it.id == commentId }?.nodeId
+      ?: throw CliException("Cannot unminimize comment $commentId: missing node id", 2)
+    val mutation = "mutation(${'$'}subjectId:ID!){unminimizeComment(input:{subjectId:${'$'}subjectId}){unminimizedComment{isMinimized minimizedReason}}}"
+    processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("gh", "api", "graphql", "-f", "query=$mutation", "-F", "subjectId=$subjectId")
+    )
   }
 
   private fun result(

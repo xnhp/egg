@@ -67,7 +67,7 @@ class GhCliGitHubApiTest {
     val api = GhCliGitHubApi(runner)
 
     val entity = """
-      {"_sync":{"id":"TH_1","base":"sha256:deadbeef"},"repo":"octo/repo","prNumber":12,"thread":{"id":"TH_1","isResolved":false,"comments":[{"id":101,"author":"alice","body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]}}
+      {"_sync":{"id":"TH_1","base":"sha256:deadbeef"},"repo":"octo/repo","prNumber":12,"thread":{"id":"TH_1","isResolved":false,"comments":[{"id":101,"author":"alice","body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"},{"body":"new local reply"}]}}
     """.trimIndent()
     val result = api.prThreadPush(
       java.nio.file.Path.of("."),
@@ -76,6 +76,27 @@ class GhCliGitHubApiTest {
 
     assertEquals(3, result.exitCode)
     assertTrue(result.payload.contains("\"status\":\"conflict\""))
+    assertEquals(1, runner.commands.size)
+  }
+
+  @Test
+  fun `thread push returns noop when stale baseline already reflects remote-applied comment`() {
+    val threadNodeResponse = """
+      {"data":{"node":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"pullRequest":{"number":12,"repository":{"nameWithOwner":"octo/repo"}},"comments":{"nodes":[{"databaseId":101,"body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"u","author":{"login":"alice"}},{"databaseId":102,"body":"new reply","createdAt":"2026-01-01T00:00:10Z","updatedAt":"2026-01-01T00:00:10Z","url":"u2","author":{"login":"ben"}}]}}}}
+    """.trimIndent()
+    val runner = SingleResponseRunner(ProcessResult(0, threadNodeResponse, ""))
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"TH_1","base":"sha256:deadbeef"},"repo":"octo/repo","prNumber":12,"thread":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"comments":[{"id":101,"author":"alice","body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"},{"body":"new reply"}]}}
+    """.trimIndent()
+    val result = api.prThreadPush(
+      java.nio.file.Path.of("."),
+      ThreadPushRequest(repo = null, pr = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"status\":\"noop\""))
     assertEquals(1, runner.commands.size)
   }
 
@@ -118,6 +139,149 @@ class GhCliGitHubApiTest {
     assertTrue(result.payload.contains("\"type\":\"reply\""))
     assertTrue(result.payload.contains("\"type\":\"resolve\""))
     assertEquals(1, runner.commands.size)
+  }
+
+  @Test
+  fun `thread push applies delete comment operation`() {
+    val threadNodeResponse = """
+      {"data":{"node":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"pullRequest":{"number":12,"repository":{"nameWithOwner":"octo/repo"}},"comments":{"nodes":[{"databaseId":101,"body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"u","author":{"login":"alice"}},{"databaseId":102,"body":"remove me","createdAt":"2026-01-01T00:00:01Z","updatedAt":"2026-01-01T00:00:01Z","url":"u2","author":{"login":"bob"}}]}}}}
+    """.trimIndent()
+    val baseSnapshot = ThreadSnapshot(
+      id = "TH_1",
+      isResolved = false,
+      isOutdated = false,
+      path = "src/A.kt",
+      line = 10,
+      comments = listOf(
+        ThreadCommentSnapshot(101, "alice", "root", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "u"),
+        ThreadCommentSnapshot(102, "bob", "remove me", "2026-01-01T00:00:01Z", "2026-01-01T00:00:01Z", "u2")
+      )
+    )
+    val base = ThreadSyncFingerprint.compute(baseSnapshot)
+    val runner = QueueResponseRunner(
+      listOf(
+        ProcessResult(0, threadNodeResponse, ""),
+        ProcessResult(0, "", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"TH_1","base":"$base"},"repo":"octo/repo","prNumber":12,"thread":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"comments":[{"id":101,"author":"alice","body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]}}
+    """.trimIndent()
+
+    val result = api.prThreadPush(
+      java.nio.file.Path.of("."),
+      ThreadPushRequest(repo = null, pr = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"status\":\"applied\""))
+    assertTrue(result.payload.contains("\"type\":\"delete-comment\""))
+    assertTrue(runner.commands.any { it == listOf("gh", "api", "-X", "DELETE", "repos/octo/repo/pulls/comments/102") })
+  }
+
+  @Test
+  fun `thread push applies minimize and unminimize operations`() {
+    val threadNodeResponse = """
+      {"data":{"node":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"pullRequest":{"number":12,"repository":{"nameWithOwner":"octo/repo"}},"comments":{"nodes":[{"id":"NODE_101","databaseId":101,"body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"u","isMinimized":false,"minimizedReason":null,"author":{"login":"alice"}},{"id":"NODE_102","databaseId":102,"body":"old","createdAt":"2026-01-01T00:00:01Z","updatedAt":"2026-01-01T00:00:01Z","url":"u2","isMinimized":true,"minimizedReason":"OUTDATED","author":{"login":"bob"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}
+    """.trimIndent()
+    val baseSnapshot = ThreadSnapshot(
+      id = "TH_1",
+      isResolved = false,
+      isOutdated = false,
+      path = "src/A.kt",
+      line = 10,
+      comments = listOf(
+        ThreadCommentSnapshot(101, "alice", "root", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "u", null, true, "NODE_101"),
+        ThreadCommentSnapshot(102, "bob", "old", "2026-01-01T00:00:01Z", "2026-01-01T00:00:01Z", "u2", "OUTDATED", true, "NODE_102")
+      )
+    )
+    val base = ThreadSyncFingerprint.compute(baseSnapshot)
+    val runner = QueueResponseRunner(
+      listOf(
+        ProcessResult(0, threadNodeResponse, ""),
+        ProcessResult(0, "{}", ""),
+        ProcessResult(0, "{}", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"TH_1","base":"$base"},"repo":"octo/repo","prNumber":12,"thread":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"comments":[{"id":101,"author":"alice","body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","minimizedReason":"OFF_TOPIC"},{"id":102,"author":"bob","body":"old","createdAt":"2026-01-01T00:00:01Z","updatedAt":"2026-01-01T00:00:01Z","minimizedReason":null}]}}
+    """.trimIndent()
+
+    val result = api.prThreadPush(
+      java.nio.file.Path.of("."),
+      ThreadPushRequest(repo = null, pr = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"type\":\"minimize-comment\""))
+    assertTrue(result.payload.contains("\"type\":\"unminimize-comment\""))
+    assertTrue(
+      runner.commands.any { command ->
+        command.any { it.contains("minimizeComment") } && command.contains("subjectId=NODE_101") && command.contains("classifier=OFF_TOPIC")
+      }
+    )
+    assertTrue(
+      runner.commands.any { command ->
+        command.any { it.contains("unminimizeComment") } && command.contains("subjectId=NODE_102")
+      }
+    )
+  }
+
+  @Test
+  fun `thread push submits review after creating thread reply`() {
+    val threadNodeResponse = """
+      {"data":{"node":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"pullRequest":{"number":12,"repository":{"nameWithOwner":"octo/repo"}},"comments":{"nodes":[{"databaseId":101,"body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"u","author":{"login":"alice"}}]}}}}
+    """.trimIndent()
+    val replyMutationResponse = """
+      {"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"C_1","pullRequestReview":{"databaseId":55},"pullRequest":{"number":12}}}}}
+    """.trimIndent()
+    val baseSnapshot = ThreadSnapshot(
+      id = "TH_1",
+      isResolved = false,
+      isOutdated = false,
+      path = "src/A.kt",
+      line = 10,
+      comments = listOf(
+        ThreadCommentSnapshot(
+          id = 101,
+          author = "alice",
+          body = "root",
+          createdAt = "2026-01-01T00:00:00Z",
+          updatedAt = "2026-01-01T00:00:00Z",
+          url = "u"
+        )
+      )
+    )
+    val base = ThreadSyncFingerprint.compute(baseSnapshot)
+    val runner = QueueResponseRunner(
+      listOf(
+        ProcessResult(0, threadNodeResponse, ""),
+        ProcessResult(0, replyMutationResponse, ""),
+        ProcessResult(0, "", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"TH_1","base":"$base"},"repo":"octo/repo","prNumber":12,"thread":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"comments":[{"id":101,"author":"alice","body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"},{"body":"new reply"}]}}
+    """.trimIndent()
+
+    val result = api.prThreadPush(
+      java.nio.file.Path.of("."),
+      ThreadPushRequest(repo = null, pr = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"status\":\"applied\""))
+    assertTrue(
+      runner.commands.any {
+        it == listOf("gh", "api", "-X", "POST", "repos/octo/repo/pulls/12/reviews/55/events", "-f", "event=COMMENT")
+      }
+    )
   }
 
   @Test
