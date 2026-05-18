@@ -6,6 +6,7 @@ import cn.varsa.cli.core.CliCommandGroup
 import cn.varsa.cli.core.CliDsl
 import cn.varsa.cli.core.CliException
 import cn.varsa.egg.git.GitApi
+import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.github.GitHubApi
 import cn.varsa.egg.output.Output
 import java.nio.file.Path
@@ -49,6 +50,7 @@ class EggApp(
     description = "GitHub workflows",
     children = listOf(
       prGroup(),
+      issuesGroup(),
       outputLeaf(
         name = "search-prs",
         description = "Search KNIME PRs by issue key",
@@ -102,6 +104,31 @@ class EggApp(
         handler = { wd, args ->
           val (repo, pr) = PrFeedbackArgsParser.parse(args)
           gitHubApi.prFeedback(wd, repo = repo, prNumber = pr)
+        }
+      )
+    )
+  )
+
+  private fun issuesGroup() = CliDsl.group(
+    name = "issues",
+    description = "Issue sync operations",
+    children = listOf(
+      outputLeaf(
+        name = "pull",
+        description = "Pull issues as sync entities",
+        handler = { wd, args ->
+          val request = IssuesPullArgsParser.parse(args)
+          gitHubApi.issuesPull(wd, request)
+        }
+      ),
+      actionLeaf(
+        name = "push",
+        description = "Push one issue sync entity from stdin",
+        handler = { wd, args ->
+          val request = IssuesPushArgsParser.parse(args, stdinProvider())
+          val result = gitHubApi.issuesPush(wd, request)
+          output.println(result.payload)
+          if (result.exitCode != 0) throw CliException("", result.exitCode)
         }
       )
     )
@@ -207,8 +234,14 @@ class EggApp(
             name = "make",
             description = "Create worktree from ~/repos",
             handler = { wd, args ->
-              requireArgCount(args, 2..3, "egg git worktree make <repo> <branch> [subdir]")
-              gitApi.makeWorktree(wd, repoName = args[0], branch = args[1], subdir = args.getOrNull(2))
+              val parsed = WorktreeMakeArgsParser.parse(args)
+              gitApi.makeWorktree(
+                wd,
+                repoName = parsed.repoName,
+                branch = parsed.branch,
+                subdir = parsed.subdir,
+                override = parsed.override
+              )
             }
           )
         )
@@ -299,10 +332,24 @@ class EggApp(
           )
         )
       ),
-      actionLeafNoArgs(
+      actionLeaf(
         name = "reword",
-        description = "Run git-reword helper",
-        handler = { wd -> gitApi.reword(wd) }
+        description = "Reword recent commits",
+        handler = { wd, args ->
+          val parsed = RewordArgsParser.parse(args)
+          if (args.isEmpty()) {
+            println(
+              "No arguments supplied; defaulting to --issue-ids using the " +
+                "current branch and author ${parsed.request.authorEmail}"
+            )
+          } else if (parsed.defaultedMode) {
+            println(
+              "Defaulting to --issue-ids using the current branch and " +
+                "author ${parsed.request.authorEmail}"
+            )
+          }
+          gitApi.reword(wd, parsed.request)
+        }
       )
     )
   )

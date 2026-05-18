@@ -2,9 +2,14 @@ package cn.varsa.egg.commands
 
 import cn.varsa.cli.core.CliMain
 import cn.varsa.egg.git.GitApi
+import cn.varsa.egg.git.RewordMode
+import cn.varsa.egg.git.RewordRequest
 import cn.varsa.egg.github.GitHubApi
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
+import cn.varsa.egg.github.IssuesPullRequest
+import cn.varsa.egg.github.IssuesPushRequest
+import cn.varsa.egg.github.IssuesPushResult
 import cn.varsa.egg.github.ThreadPullRequest
 import cn.varsa.egg.github.ThreadPushRequest
 import cn.varsa.egg.github.ThreadPushResult
@@ -64,6 +69,31 @@ class EggAppTest {
   }
 
   @Test
+  fun `worktree make forwards override flag to git api`() {
+    val output = BufferedOutput()
+    val gitApi = NoopGitApi()
+    val app = EggApp(gitHubApi = FakeGitHubApi(), gitApi = gitApi, output = output)
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("git", "worktree", "make", "--override", "knime-ui", "enh/NXT-4439"))
+
+    assertEquals(0, exitCode)
+    assertEquals("knime-ui", gitApi.lastWorktreeRepoName)
+    assertEquals("enh/NXT-4439", gitApi.lastWorktreeBranch)
+    assertEquals(null, gitApi.lastWorktreeSubdir)
+    assertEquals(true, gitApi.lastWorktreeOverride)
+  }
+
+  @Test
+  fun `worktree make parser accepts override after positional args`() {
+    val parsed = WorktreeMakeArgsParser.parse(arrayOf("knime-ui", "enh/NXT-4439", "org.knime.ui", "--override"))
+
+    assertEquals("knime-ui", parsed.repoName)
+    assertEquals("enh/NXT-4439", parsed.branch)
+    assertEquals("org.knime.ui", parsed.subdir)
+    assertEquals(true, parsed.override)
+  }
+
+  @Test
   fun `reply parser rejects unknown option`() {
     val error = assertFailsWith<RuntimeException> {
       ReplyArgsParser.parse(arrayOf("--wat", "1"))
@@ -93,7 +123,38 @@ class EggAppTest {
     val exitCode = CliMain.run(app.commandTree(), arrayOf("__complete", "egg", "gh"))
 
     assertEquals(0, exitCode)
-    assertEquals(listOf("look\nlook-web\npr\nsearch\nsearch-prs"), output.lines())
+    assertEquals(listOf("issues\nlook\nlook-web\npr\nsearch\nsearch-prs"), output.lines())
+  }
+
+  @Test
+  fun `issues pull forwards args to github api`() {
+    val fakeApi = FakeGitHubApi(issuesPullResult = "{\"issues\":[]}")
+    val output = BufferedOutput()
+    val app = EggApp(gitHubApi = fakeApi, gitApi = NoopGitApi(), output = output)
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("gh", "issues", "pull", "--repo", "octo/repo", "--state", "open", "--json"))
+
+    assertEquals(0, exitCode)
+    assertEquals(listOf("{\"issues\":[]}"), output.lines())
+    assertEquals(IssuesPullRequest(repo = "octo/repo", issue = null, state = "open", json = true), fakeApi.lastIssuesPullRequest)
+  }
+
+  @Test
+  fun `issues push prints payload and exits with api exit code`() {
+    val fakeApi = FakeGitHubApi(issuesPushResult = IssuesPushResult(payload = "{\"status\":\"conflict\"}", exitCode = 3))
+    val output = BufferedOutput()
+    val app = EggApp(
+      gitHubApi = fakeApi,
+      gitApi = NoopGitApi(),
+      output = output,
+      stdinProvider = { "{\"_sync\":{\"id\":\"I\",\"base\":\"sha256:abc\"},\"repo\":\"octo/repo\",\"issueNumber\":12,\"issue\":{\"id\":\"I\",\"number\":12,\"title\":\"t\",\"body\":\"b\",\"state\":\"OPEN\",\"assignees\":[],\"labels\":[]}}" }
+    )
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("gh", "issues", "push", "--dry-run", "--json"))
+
+    assertEquals(3, exitCode)
+    assertEquals(listOf("{\"status\":\"conflict\"}"), output.lines())
+    assertEquals(true, fakeApi.lastIssuesPushRequest?.dryRun)
   }
 
   @Test
@@ -127,17 +188,39 @@ class EggAppTest {
     assertEquals(true, fakeApi.lastThreadPushRequest?.dryRun)
   }
 
+  @Test
+  fun `reword command forwards parsed request to git api`() {
+    val output = BufferedOutput()
+    val gitApi = NoopGitApi()
+    val app = EggApp(gitHubApi = FakeGitHubApi(), gitApi = gitApi, output = output)
+
+    val exitCode = CliMain.run(
+      app.commandTree(),
+      arrayOf("git", "reword", "--remove-WIP", "--author", "dev@knime.com", "--num-commits", "5")
+    )
+
+    assertEquals(0, exitCode)
+    assertEquals(
+      RewordRequest(mode = RewordMode.REMOVE_WIP, numCommits = 5, authorEmail = "dev@knime.com"),
+      gitApi.lastRewordRequest
+    )
+  }
+
   private class FakeGitHubApi(
     private val prId: String = "1",
     private val prUrl: String = "https://example.test/pr/1",
     private val replyResult: String = "ok",
     private val resolveResult: String = "ok",
     private val threadPullResult: String = "{\"threads\":[]}",
-    private val threadPushResult: ThreadPushResult = ThreadPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0)
+    private val threadPushResult: ThreadPushResult = ThreadPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0),
+    private val issuesPullResult: String = "{\"issues\":[]}",
+    private val issuesPushResult: IssuesPushResult = IssuesPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0)
   ) : GitHubApi {
     var lastReplyRequest: ReplyRequest? = null
     var lastThreadPullRequest: ThreadPullRequest? = null
     var lastThreadPushRequest: ThreadPushRequest? = null
+    var lastIssuesPullRequest: IssuesPullRequest? = null
+    var lastIssuesPushRequest: IssuesPushRequest? = null
 
     override fun currentPrId(workingDir: java.nio.file.Path): String = prId
 
@@ -172,6 +255,16 @@ class EggAppTest {
       return threadPushResult
     }
 
+    override fun issuesPull(workingDir: java.nio.file.Path, request: IssuesPullRequest): String {
+      lastIssuesPullRequest = request
+      return issuesPullResult
+    }
+
+    override fun issuesPush(workingDir: java.nio.file.Path, request: IssuesPushRequest): IssuesPushResult {
+      lastIssuesPushRequest = request
+      return issuesPushResult
+    }
+
     override fun searchPrs(workingDir: java.nio.file.Path, issueKey: String): String = "[]"
 
     override fun searchCode(workingDir: java.nio.file.Path, queryParts: List<String>): String = "[]"
@@ -182,7 +275,18 @@ class EggAppTest {
   }
 
   private class NoopGitApi(private val changedPaths: String = "") : GitApi {
-    override fun makeWorktree(workingDir: java.nio.file.Path, repoName: String, branch: String, subdir: String?) = Unit
+    var lastRewordRequest: RewordRequest? = null
+    var lastWorktreeRepoName: String? = null
+    var lastWorktreeBranch: String? = null
+    var lastWorktreeSubdir: String? = null
+    var lastWorktreeOverride: Boolean? = null
+
+    override fun makeWorktree(workingDir: java.nio.file.Path, repoName: String, branch: String, subdir: String?, override: Boolean) {
+      lastWorktreeRepoName = repoName
+      lastWorktreeBranch = branch
+      lastWorktreeSubdir = subdir
+      lastWorktreeOverride = override
+    }
 
     override fun generateCommitMessage(workingDir: java.nio.file.Path): String = ""
 
@@ -204,6 +308,8 @@ class EggAppTest {
 
     override fun cloneKnime(workingDir: java.nio.file.Path, repo: String) = Unit
 
-    override fun reword(workingDir: java.nio.file.Path) = Unit
+    override fun reword(workingDir: java.nio.file.Path, request: RewordRequest) {
+      lastRewordRequest = request
+    }
   }
 }

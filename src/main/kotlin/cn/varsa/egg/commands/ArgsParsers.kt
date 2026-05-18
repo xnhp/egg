@@ -1,8 +1,12 @@
 package cn.varsa.egg.commands
 
 import cn.varsa.cli.core.CliException
+import cn.varsa.egg.git.RewordMode
+import cn.varsa.egg.git.RewordRequest
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
+import cn.varsa.egg.github.IssuesPullRequest
+import cn.varsa.egg.github.IssuesPushRequest
 import cn.varsa.egg.github.ThreadPullRequest
 import cn.varsa.egg.github.ThreadPushRequest
 
@@ -121,6 +125,52 @@ object ThreadPushArgsParser {
   }
 }
 
+object IssuesPullArgsParser {
+  fun parse(args: Array<String>): IssuesPullRequest {
+    var repo: String? = null
+    var issue: String? = null
+    var state: String? = null
+    var json = false
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--repo" -> repo = optionValue(args, ++idx, "--repo")
+        "--issue" -> issue = optionValue(args, ++idx, "--issue")
+        "--state" -> state = optionValue(args, ++idx, "--state")
+        "--json" -> json = true
+        else -> throw CliException("Unknown option: $arg", 2)
+      }
+      idx++
+    }
+
+    return IssuesPullRequest(repo = repo, issue = issue, state = state, json = json)
+  }
+}
+
+object IssuesPushArgsParser {
+  fun parse(args: Array<String>, entityJson: String): IssuesPushRequest {
+    var repo: String? = null
+    var issue: String? = null
+    var dryRun = false
+    var json = false
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--repo" -> repo = optionValue(args, ++idx, "--repo")
+        "--issue" -> issue = optionValue(args, ++idx, "--issue")
+        "--dry-run" -> dryRun = true
+        "--json" -> json = true
+        else -> throw CliException("Unknown option: $arg", 2)
+      }
+      idx++
+    }
+
+    return IssuesPushRequest(repo = repo, issue = issue, dryRun = dryRun, json = json, entityJson = entityJson)
+  }
+}
+
 object ChangedPathsArgsParser {
   fun parse(args: Array<String>): Pair<Boolean, String?> {
     var staged = false
@@ -139,6 +189,113 @@ object ChangedPathsArgsParser {
       idx++
     }
     return staged to range
+  }
+}
+
+object WorktreeMakeArgsParser {
+  data class ParseResult(
+    val repoName: String,
+    val branch: String,
+    val subdir: String?,
+    val override: Boolean
+  )
+
+  fun parse(args: Array<String>): ParseResult {
+    var override = false
+    val positional = mutableListOf<String>()
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--override" -> override = true
+        else -> {
+          if (arg.startsWith("--")) throw CliException("Unknown option: $arg", 2)
+          positional += arg
+        }
+      }
+      idx += 1
+    }
+
+    if (positional.size !in 2..3) {
+      throw CliException("Usage: egg git worktree make [--override] <repo> <branch> [subdir]", 2)
+    }
+
+    return ParseResult(
+      repoName = positional[0],
+      branch = positional[1],
+      subdir = positional.getOrNull(2),
+      override = override
+    )
+  }
+}
+
+object RewordArgsParser {
+  private const val defaultAuthor = "benjamin.moser@knime.com"
+  private const val defaultNumCommits = 3
+
+  data class ParseResult(val request: RewordRequest, val defaultedMode: Boolean)
+
+  fun parse(args: Array<String>): ParseResult {
+    if (args.isEmpty()) {
+      return ParseResult(
+        request = RewordRequest(mode = RewordMode.ISSUE_IDS, numCommits = defaultNumCommits, authorEmail = defaultAuthor),
+        defaultedMode = true
+      )
+    }
+
+    var mode: RewordMode? = null
+    var numCommits = defaultNumCommits
+    var author = defaultAuthor
+    var positionalNumCommits: Int? = null
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--issue-ids" -> mode = setMode(mode, RewordMode.ISSUE_IDS)
+        "--remove-WIP" -> mode = setMode(mode, RewordMode.REMOVE_WIP)
+        "--author" -> author = optionValue(args, ++idx, "--author").trim()
+        "--num-commits" -> {
+          val raw = optionValue(args, ++idx, "--num-commits")
+          numCommits = parsePositiveInt(raw, "--num-commits")
+        }
+        else -> {
+          if (arg.startsWith("--")) throw CliException("Unknown option: $arg", 2)
+          if (positionalNumCommits != null) throw CliException("Usage: egg git reword [--issue-ids|--remove-WIP] [--author <email>] [--num-commits <n>] [n]", 2)
+          positionalNumCommits = parsePositiveInt(arg, "num_commits")
+        }
+      }
+      idx += 1
+    }
+
+    if (positionalNumCommits != null) {
+      if (args.contains("--num-commits")) {
+        throw CliException("Error: use either --num-commits or the positional num_commits, not both.", 1)
+      }
+      numCommits = positionalNumCommits
+    }
+
+    val hasOptionArgs = args.any { it.startsWith("-") }
+    val onlyPositionalNum = positionalNumCommits != null && !hasOptionArgs
+    val defaultedMode = mode == null
+    val finalMode = if (onlyPositionalNum || defaultedMode) RewordMode.ISSUE_IDS else mode!!
+
+    return ParseResult(
+      request = RewordRequest(mode = finalMode, numCommits = numCommits, authorEmail = author),
+      defaultedMode = defaultedMode || onlyPositionalNum
+    )
+  }
+
+  private fun parsePositiveInt(raw: String, name: String): Int {
+    val value = raw.toIntOrNull() ?: throw CliException("Invalid value for $name: $raw", 2)
+    if (value <= 0) throw CliException("Error: --num-commits must be greater than 0.", 1)
+    return value
+  }
+
+  private fun setMode(current: RewordMode?, next: RewordMode): RewordMode {
+    if (current != null && current != next) {
+      throw CliException("Error: --issue-ids and --remove-WIP are mutually exclusive", 1)
+    }
+    return next
   }
 }
 

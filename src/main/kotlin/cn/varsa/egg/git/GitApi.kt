@@ -16,7 +16,7 @@ import java.nio.file.Path
 import java.util.Base64
 
 interface GitApi {
-  fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?)
+  fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?, override: Boolean)
   fun generateCommitMessage(workingDir: Path): String
   fun changedPaths(workingDir: Path, staged: Boolean, range: String?): String
   fun localIgnore(workingDir: Path, pattern: String): String
@@ -46,7 +46,7 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
   private val defaultAuthorEmail = "benjamin.moser@knime.com"
   private val httpClient: HttpClient = HttpClient.newHttpClient()
 
-  override fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?) {
+  override fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?, override: Boolean) {
     val repoPath = Path.of(System.getProperty("user.home"), "repos", repoName)
     val branchDirName = branch.replace('/', '_')
     val worktreePath = workingDir.resolve("${repoName}_$branchDirName").normalize()
@@ -54,12 +54,18 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
     val hasLocalBranch = processRunner.run(repoPath, listOf("git", "show-ref", "--verify", "--quiet", "refs/heads/$branch")).exitCode == 0
     val hasRemoteBranch = processRunner.run(repoPath, listOf("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/$branch")).exitCode == 0
 
+    if (override && isRegisteredWorktreePath(repoPath, worktreePath)) {
+      println("[INFO] Overriding existing registered worktree path: $worktreePath")
+    }
+
+    val forceArgs = if (override) listOf("-f") else emptyList()
+
     when {
-      hasLocalBranch -> processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add", worktreePath.toString(), branch))
-      hasRemoteBranch -> processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add", "-b", branch, worktreePath.toString(), "origin/$branch"))
+      hasLocalBranch -> processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf(worktreePath.toString(), branch))
+      hasRemoteBranch -> processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), "origin/$branch"))
       else -> {
         val baseRef = defaultBaseRef(repoPath)
-        processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add", "-b", branch, worktreePath.toString(), baseRef))
+        processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), baseRef))
       }
     }
 
@@ -67,6 +73,15 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       processRunner.runCaptureOrThrow(worktreePath, listOf("git", "sparse-checkout", "init", "--cone"))
       processRunner.runCaptureOrThrow(worktreePath, listOf("git", "sparse-checkout", "set", subdir))
     }
+  }
+
+  private fun isRegisteredWorktreePath(repoPath: Path, worktreePath: Path): Boolean {
+    val worktreeList = processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "list", "--porcelain"))
+    return worktreeList
+      .lineSequence()
+      .filter { it.startsWith("worktree ") }
+      .map { Path.of(it.removePrefix("worktree ").trim()).normalize() }
+      .any { it == worktreePath }
   }
 
   override fun generateCommitMessage(workingDir: Path): String {
