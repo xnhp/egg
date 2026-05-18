@@ -227,26 +227,44 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
     request: RewordRequest,
     transform: (String) -> String
   ) {
-    val commits = commitsToReword(workingDir, request.numCommits, request.authorEmail)
-    if (commits.isEmpty()) {
-      println("No commits found to reword")
-      return
-    }
-
     val stashed = stashChangesIfNeeded(workingDir)
     try {
-      commits.asReversed().forEach { commitHash ->
-        val original = processRunner.runCaptureOrThrow(
-          workingDir,
-          listOf("git", "log", "-1", "--format=%B", commitHash)
-        )
-        val updated = transform(original)
-        if (updated == original) {
-          println("Skipping commit ${commitHash.take(7)} (no changes needed)")
-          return@forEach
+      var sawCandidates = false
+      val rewritten = mutableSetOf<String>()
+      while (true) {
+        val commits = commitsToReword(workingDir, request.numCommits, request.authorEmail)
+        if (commits.isEmpty()) {
+          if (!sawCandidates) {
+            println("No commits found to reword")
+          }
+          return
         }
-        println("Rewording commit ${commitHash.take(7)}")
-        rewordCommit(workingDir, commitHash, updated)
+
+        sawCandidates = true
+        var rewroteAny = false
+        for (commitHash in commits.asReversed()) {
+          if (rewritten.contains(commitHash)) {
+            continue
+          }
+          val original = processRunner.runCaptureOrThrow(
+            workingDir,
+            listOf("git", "log", "-1", "--format=%B", commitHash)
+          )
+          val updated = transform(original)
+          if (updated == original) {
+            println("Skipping commit ${commitHash.take(7)} (no changes needed)")
+            continue
+          }
+          println("Rewording commit ${commitHash.take(7)}")
+          rewordCommit(workingDir, commitHash, updated)
+          rewritten.add(commitHash)
+          rewroteAny = true
+          break
+        }
+
+        if (!rewroteAny) {
+          return
+        }
       }
     } finally {
       if (stashed) restoreStashedChanges(workingDir)
