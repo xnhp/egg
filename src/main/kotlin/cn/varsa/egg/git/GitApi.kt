@@ -3,9 +3,17 @@ package cn.varsa.egg.git
 import cn.varsa.cli.core.CliException
 import cn.varsa.egg.runtime.ProcessRunner
 import cn.varsa.egg.runtime.runCaptureOrThrow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Base64
 
 interface GitApi {
   fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?)
@@ -19,10 +27,25 @@ interface GitApi {
   fun updateMaster(workingDir: Path)
   fun cloneBranch(workingDir: Path, repo: String, branch: String)
   fun cloneKnime(workingDir: Path, repo: String)
-  fun reword(workingDir: Path)
+  fun reword(workingDir: Path, request: RewordRequest)
 }
 
+enum class RewordMode {
+  ISSUE_IDS,
+  REMOVE_WIP
+}
+
+data class RewordRequest(
+  val mode: RewordMode,
+  val numCommits: Int,
+  val authorEmail: String
+)
+
 class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
+  private val jiraIdRegex = Regex("([A-Z]+-\\d+)")
+  private val defaultAuthorEmail = "benjamin.moser@knime.com"
+  private val httpClient: HttpClient = HttpClient.newHttpClient()
+
   override fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?) {
     val repoPath = Path.of(System.getProperty("user.home"), "repos", repoName)
     val branchDirName = branch.replace('/', '_')
@@ -164,11 +187,234 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
     processRunner.runCaptureOrThrow(workingDir, listOf("git", "clone", "git@github.com:knime/$repo.git"))
   }
 
-  override fun reword(workingDir: Path) {
-    val home = System.getProperty("user.home")
-    val python = Path.of(home, "git-repositories", "git-reword", ".venv", "bin", "python")
-    val script = Path.of(home, "git-repositories", "git-reword", "reword.py")
-    processRunner.runCaptureOrThrow(workingDir, listOf(python.toString(), script.toString()))
+  override fun reword(workingDir: Path, request: RewordRequest) {
+    if (request.numCommits <= 0) throw CliException("Error: --num-commits must be greater than 0.", 1)
+    if (request.authorEmail.isNotBlank()) {
+      println("Author filtering enabled. Only processing commits from: ${request.authorEmail}")
+    }
+
+    when (request.mode) {
+      RewordMode.ISSUE_IDS -> processIssueIdsMode(workingDir, request)
+      RewordMode.REMOVE_WIP -> processRemoveWipMode(workingDir, request)
+    }
+  }
+
+  private fun processIssueIdsMode(workingDir: Path, request: RewordRequest) {
+    val currentBranch = runOrEmpty(workingDir, listOf("git", "branch", "--show-current"))
+    if (currentBranch == "master") {
+      println("Skipping repository ${workingDir.normalize()} (currently on master branch)")
+      return
+    }
+
+    val issueId = jiraIdRegex.find(currentBranch)?.groupValues?.get(1)
+    if (issueId.isNullOrBlank()) {
+      println("Current branch '$currentBranch' does not contain a valid Jira issue ID. Stopping.")
+      return
+    }
+
+    val summary = fetchJiraSummary(issueId)
+    processCommits(workingDir, request) { original ->
+      formatCommitMessage(original, issueId, summary)
+    }
+  }
+
+  private fun processRemoveWipMode(workingDir: Path, request: RewordRequest) {
+    processCommits(workingDir, request) { original -> removeWipTokens(original) }
+  }
+
+  private fun processCommits(
+    workingDir: Path,
+    request: RewordRequest,
+    transform: (String) -> String
+  ) {
+    val commits = commitsToReword(workingDir, request.numCommits, request.authorEmail)
+    if (commits.isEmpty()) {
+      println("No commits found to reword")
+      return
+    }
+
+    val stashed = stashChangesIfNeeded(workingDir)
+    try {
+      commits.asReversed().forEach { commitHash ->
+        val original = processRunner.runCaptureOrThrow(
+          workingDir,
+          listOf("git", "log", "-1", "--format=%B", commitHash)
+        )
+        val updated = transform(original)
+        if (updated == original) {
+          println("Skipping commit ${commitHash.take(7)} (no changes needed)")
+          return@forEach
+        }
+        println("Rewording commit ${commitHash.take(7)}")
+        rewordCommit(workingDir, commitHash, updated)
+      }
+    } finally {
+      if (stashed) restoreStashedChanges(workingDir)
+    }
+  }
+
+  private fun commitsToReword(workingDir: Path, count: Int, authorEmail: String): List<String> {
+    val command = mutableListOf("git", "log", "-$count", "--format=%H")
+    if (authorEmail.isNotBlank()) {
+      command += listOf("--author", authorEmail)
+    }
+    val output = processRunner.runCaptureOrThrow(workingDir, command)
+    return output
+      .lineSequence()
+      .map { it.trim() }
+      .filter { it.isNotBlank() }
+      .toList()
+  }
+
+  private fun stashChangesIfNeeded(workingDir: Path): Boolean {
+    val status = runOrEmpty(workingDir, listOf("git", "status", "--porcelain"))
+    if (status.isBlank()) return false
+    println("Stashing existing changes")
+    processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("git", "stash", "push", "--include-untracked", "--message", "egg-reword-temp")
+    )
+    return true
+  }
+
+  private fun restoreStashedChanges(workingDir: Path) {
+    val result = processRunner.run(workingDir, listOf("git", "stash", "pop"))
+    if (result.exitCode == 0) {
+      println("Restored stashed changes")
+      return
+    }
+    println("Warning: Failed to apply stashed changes automatically.")
+    println("Run 'git stash pop' manually to restore them.")
+    if (result.stderr.isNotBlank()) println(result.stderr)
+  }
+
+  private fun rewordCommit(workingDir: Path, commitHash: String, newMessage: String) {
+    val originalBranch = processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("git", "branch", "--show-current")
+    )
+    val parentCommit = processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("git", "rev-parse", "$commitHash^")
+    )
+    val tempBranch = "temp-reword-${commitHash.take(7)}"
+
+    try {
+      processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("git", "checkout", "-b", tempBranch, commitHash)
+      )
+      processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("git", "commit", "--amend", "-m", newMessage)
+      )
+      val newCommit = processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("git", "rev-parse", "HEAD")
+      )
+
+      processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("git", "checkout", originalBranch)
+      )
+      processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("git", "rebase", "--onto", newCommit, parentCommit)
+      )
+    } catch (e: CliException) {
+      processRunner.run(workingDir, listOf("git", "rebase", "--abort"))
+      processRunner.run(workingDir, listOf("git", "checkout", originalBranch))
+      processRunner.run(workingDir, listOf("git", "branch", "-D", tempBranch))
+      throw e
+    } finally {
+      processRunner.run(workingDir, listOf("git", "branch", "-D", tempBranch))
+    }
+  }
+
+  private fun formatCommitMessage(original: String, issueId: String, summary: String): String {
+    val trimmed = original.trimEnd()
+    val parts = trimmed.split("\n\n", limit = 2)
+    val subject = parts[0]
+    val body = parts.getOrNull(1).orEmpty()
+
+    if (jiraIdRegex.containsMatchIn(subject)) return original
+
+    val newSubject = "$issueId: $subject"
+    val suffix = "$issueId ($summary)"
+    val newBody = if (body.isBlank()) suffix else "${body.trim()}\n\n$suffix"
+    return "$newSubject\n\n$newBody"
+  }
+
+  private fun removeWipTokens(text: String): String {
+    val leadingPattern = Regex("^\\s*WIP[:\\-\\s]+", RegexOption.IGNORE_CASE)
+    val inlinePattern = Regex("\\b\\(*\\[?WIP\\]?\\)*\\b[:\\-]?", RegexOption.IGNORE_CASE)
+
+    return text
+      .split("\n")
+      .joinToString("\n") { line ->
+        line
+          .replace(leadingPattern, "")
+          .replace(inlinePattern, "")
+          .replace(Regex("\\s{2,}"), " ")
+          .trim()
+      }
+      .trimEnd()
+  }
+
+  private fun fetchJiraSummary(issueId: String): String {
+    val jiraUrl = requireConfig("JIRA_URL")
+    val jiraEmail = requireConfig("JIRA_EMAIL")
+    val jiraApiToken = requireConfig("JIRA_API_TOKEN")
+
+    val base = jiraUrl.trimEnd('/')
+    val request = HttpRequest.newBuilder()
+      .uri(URI.create("$base/rest/api/3/issue/$issueId"))
+      .header("Accept", "application/json")
+      .header("Authorization", basicAuth(jiraEmail, jiraApiToken))
+      .GET()
+      .build()
+
+    val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+    if (response.statusCode() !in 200..299) {
+      throw CliException(
+        "Error getting Jira issue summary: Failed to fetch Jira issue: ${response.body()}",
+        1
+      )
+    }
+
+    return try {
+      Json.parseToJsonElement(response.body())
+        .jsonObject["fields"]
+        ?.jsonObject
+        ?.get("summary")
+        ?.jsonPrimitive
+        ?.content
+        ?: throw IllegalStateException("Missing fields.summary")
+    } catch (ex: Exception) {
+      throw CliException("Error getting Jira issue summary: invalid Jira response: ${ex.message}", 1)
+    }
+  }
+
+  private fun requireConfig(name: String): String {
+    val value = System.getenv(name)?.trim().orEmpty().ifBlank {
+      System.getProperty(name)?.trim().orEmpty()
+    }
+    if (value.isNotBlank()) return value
+
+    if (name == "AUTHOR_EMAIL") {
+      return defaultAuthorEmail
+    }
+
+    throw CliException(
+      "JIRA credentials not configured. Please set JIRA_URL, JIRA_EMAIL, and JIRA_API_TOKEN environment variables.",
+      1
+    )
+  }
+
+  private fun basicAuth(email: String, token: String): String {
+    val raw = "$email:$token"
+    val encoded = Base64.getEncoder().encodeToString(raw.toByteArray(Charsets.UTF_8))
+    return "Basic $encoded"
   }
 
   private fun resolveGlobalIgnoreFile(workingDir: Path): Path {
