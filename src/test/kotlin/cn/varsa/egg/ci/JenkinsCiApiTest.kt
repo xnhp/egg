@@ -151,6 +151,39 @@ class JenkinsCiApiTest {
     assertEquals(3, runner.commands.size)
   }
 
+  @Test
+  fun `status defaults to master when PR and branch cannot be inferred`() {
+    System.setProperty("JENKINS_SITE", "https://jenkins.knime.com")
+    System.setProperty("JENKINS_USER", "user")
+    System.setProperty("JENKINS_TOKEN", "token")
+
+    val runner = RecordingRunner(
+      responses = mapOf(
+        listOf("gh", "pr", "view", "--json", "number", "--jq", ".number") to ProcessResult(1, "", "no pull requests found"),
+        listOf("git", "branch", "--show-current") to ProcessResult(1, "", "not a git repository")
+      )
+    )
+    val http = RecordingJenkinsHttp(
+      responses = mapOf(
+        "https://jenkins.knime.com/job/knime-gateway/job/master/lastBuild/api/json?tree=number,url,fullDisplayName,result,building" to
+          JenkinsResponse(
+            200,
+            """
+            {"number":11,"url":"https://jenkins.knime.com/job/knime-gateway/job/master/11/","fullDisplayName":"knime-gateway/master #11","result":"SUCCESS","building":false}
+            """.trimIndent()
+          ),
+        "https://jenkins.knime.com/job/knime-gateway/job/master/11/wfapi/describe" to JenkinsResponse(404, ""),
+        "https://jenkins.knime.com/job/knime-gateway/job/master/11/testReport/api/json?tree=suites[cases[className,name,status,errorDetails,errorStackTrace]]" to JenkinsResponse(404, "")
+      )
+    )
+    val api = JenkinsCiApi(runner, http)
+
+    val output = api.status(Path.of("."), CiStatusRequest(jobOrRepo = "knime-gateway", branchOrPr = null))
+
+    assertTrue(output.contains("Branch/PR: master"))
+    assertTrue(output.contains("Pipeline: SUCCESS"))
+  }
+
   private class RecordingRunner(
     private val responses: Map<List<String>, ProcessResult>
   ) : ProcessRunner {

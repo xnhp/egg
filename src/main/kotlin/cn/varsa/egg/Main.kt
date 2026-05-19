@@ -7,6 +7,7 @@ import cn.varsa.egg.git.GitCliApi
 import cn.varsa.egg.github.GhCliGitHubApi
 import cn.varsa.egg.output.StdOutput
 import cn.varsa.egg.runtime.SystemProcessRunner
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -52,14 +53,35 @@ private fun dotenvCandidates(): List<Path> {
   }
   val appHome = System.getenv("APP_HOME")
   if (!appHome.isNullOrBlank()) {
-    val appHomePath = Path.of(appHome)
-    candidates.add(appHomePath.resolve(".env"))
-    candidates.add(Path.of(appHome, "..", "..", "..", ".env").normalize())
+    addPathAndParents(candidates, Path.of(appHome), levels = 8)
+  }
+
+  val classPath = System.getProperty("java.class.path")
+  if (!classPath.isNullOrBlank()) {
+    classPath.split(File.pathSeparator)
+      .filter { it.isNotBlank() }
+      .forEach { entry ->
+        runCatching { Path.of(entry) }
+          .onSuccess { path ->
+            if (Files.isRegularFile(path)) {
+              addPathAndParents(candidates, path.parent, levels = 8)
+            }
+          }
+      }
   }
   if (!cwd.isNullOrBlank()) {
     candidates.add(Path.of(cwd, ".env"))
   }
   return candidates
+}
+
+private fun addPathAndParents(candidates: MutableList<Path>, base: Path, levels: Int) {
+  candidates.add(base.resolve(".env"))
+  var parent = base
+  repeat(levels) {
+    parent = parent.parent ?: return@repeat
+    candidates.add(parent.resolve(".env"))
+  }
 }
 
 private fun parseDotEnvLine(line: String): Pair<String, String>? {

@@ -139,8 +139,7 @@ class JenkinsCiApi(
       listOf("git", "branch", "--show-current")
     )?.trim().orEmpty()
     if (branch.isNotBlank()) return branch
-
-    throw CliException("Could not infer branch/pr from current directory", 2)
+    return "master"
   }
 
   private fun readConfig(key: String): String {
