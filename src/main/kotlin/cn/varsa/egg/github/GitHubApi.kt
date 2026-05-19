@@ -6,6 +6,7 @@ import cn.varsa.egg.runtime.runCaptureOrNull
 import cn.varsa.egg.runtime.runCaptureOrThrow
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.Base64
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -55,6 +56,26 @@ data class ThreadPushResult(
   val exitCode: Int
 )
 
+data class IssuesPullRequest(
+  val repo: String?,
+  val issue: String?,
+  val state: String?,
+  val json: Boolean
+)
+
+data class IssuesPushRequest(
+  val repo: String?,
+  val issue: String?,
+  val dryRun: Boolean,
+  val json: Boolean,
+  val entityJson: String
+)
+
+data class IssuesPushResult(
+  val payload: String,
+  val exitCode: Int
+)
+
 private data class CreatedThreadReply(
   val reviewId: Int?,
   val pullNumber: Int?
@@ -73,6 +94,8 @@ interface GitHubApi {
   fun resolveReviewComments(workingDir: Path, request: ResolveRequest): String
   fun prThreadPull(workingDir: Path, request: ThreadPullRequest): String
   fun prThreadPush(workingDir: Path, request: ThreadPushRequest): ThreadPushResult
+  fun issuesPull(workingDir: Path, request: IssuesPullRequest): String
+  fun issuesPush(workingDir: Path, request: IssuesPushRequest): IssuesPushResult
   fun searchPrs(workingDir: Path, issueKey: String): String
   fun searchCode(workingDir: Path, queryParts: List<String>): String
   fun look(workingDir: Path, repo: String, path: String, ref: String?): String
@@ -444,6 +467,187 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
     }
   }
 
+  override fun issuesPull(workingDir: Path, request: IssuesPullRequest): String {
+    val repo = request.repo ?: resolveRepo(workingDir)
+    val issueNumber = request.issue?.toIntOrNull()
+      ?: request.issue?.let { throw CliException("--issue must be an integer", 2) }
+    val state = request.state?.trim()?.lowercase()?.ifEmpty { null } ?: "open"
+    if (state != "open" && state != "closed" && state != "all") {
+      throw CliException("--state must be one of open|closed|all", 2)
+    }
+
+    val snapshots = if (issueNumber != null) {
+      listOf(fetchIssueByNumber(workingDir, repo, issueNumber))
+    } else {
+      fetchIssuesForRepo(workingDir, repo, state)
+    }
+
+    val issues = snapshots.map { issueEntity(repo, it) }
+    return buildJsonObject {
+      put("issues", JsonArray(issues))
+    }.toString()
+  }
+
+  override fun issuesPush(workingDir: Path, request: IssuesPushRequest): IssuesPushResult {
+    return try {
+      val local = parseIssueEntity(workingDir, request.entityJson, request.repo, request.issue)
+      val remote = fetchIssueByNumber(workingDir, local.repo, local.issueNumber)
+      if (remote.id != local.syncId) {
+        return issueResult(
+          status = "conflict",
+          exitCode = 3,
+          syncId = local.syncId,
+          repo = local.repo,
+          issueNumber = local.issueNumber,
+          operations = emptyList(),
+          message = "Remote issue identity does not match _sync.id"
+        )
+      }
+      val remoteFingerprint = IssueSyncFingerprint.compute(remote)
+      if (remoteFingerprint != local.syncBase) {
+        val deltaOnCurrent = try {
+          IssueDeltaDeriver.derive(remote, local.issue)
+        } catch (e: CliException) {
+          if (e.exitCode == 2) {
+            return issueResult(
+              status = "invalid",
+              exitCode = 2,
+              syncId = local.syncId,
+              repo = local.repo,
+              issueNumber = local.issueNumber,
+              operations = emptyList(),
+              message = e.message ?: "Push failed"
+            )
+          }
+          null
+        }
+        if (deltaOnCurrent != null && deltaOnCurrent.hasNoChanges()) {
+          return issueResult(
+            status = "noop",
+            exitCode = 0,
+            syncId = local.syncId,
+            repo = local.repo,
+            issueNumber = local.issueNumber,
+            operations = emptyList(),
+            message = "Remote changed since baseline; local intent already applied"
+          )
+        }
+        return issueResult(
+          status = "conflict",
+          exitCode = 3,
+          syncId = local.syncId,
+          repo = local.repo,
+          issueNumber = local.issueNumber,
+          operations = emptyList(),
+          message = "Remote issue changed since baseline"
+        )
+      }
+
+      val delta = IssueDeltaDeriver.derive(remote, local.issue)
+      val operations = mutableListOf<JsonObject>()
+      if (delta.changedTitle != null) operations += buildJsonObject { put("type", "update-title") }
+      if (delta.changedBody != null) operations += buildJsonObject { put("type", "update-body") }
+      if (delta.changedState != null) operations += buildJsonObject { put("type", "update-state") }
+      if (delta.changedStateReason != null) operations += buildJsonObject { put("type", "update-state-reason") }
+      if (delta.changedLabels != null) {
+        operations += buildJsonObject {
+          put("type", "set-labels")
+          put("count", delta.changedLabels.size)
+        }
+      }
+      if (delta.changedAssignees != null) {
+        operations += buildJsonObject {
+          put("type", "set-assignees")
+          put("count", delta.changedAssignees.size)
+        }
+      }
+      if (delta.appendedCommentBodies.isNotEmpty()) {
+        operations += buildJsonObject {
+          put("type", "reply-comment")
+          put("count", delta.appendedCommentBodies.size)
+        }
+      }
+      if (delta.milestoneChanged) {
+        operations += buildJsonObject {
+          put("type", "set-milestone")
+          if (delta.changedMilestoneNumber != null) put("number", delta.changedMilestoneNumber)
+        }
+      }
+
+      if (operations.isEmpty()) {
+        return issueResult(
+          status = "noop",
+          exitCode = 0,
+          syncId = local.syncId,
+          repo = local.repo,
+          issueNumber = local.issueNumber,
+          operations = emptyList(),
+          message = "No changes to apply"
+        )
+      }
+
+      if (!request.dryRun) {
+        val patch = buildJsonObject {
+          if (delta.changedTitle != null) put("title", delta.changedTitle)
+          if (delta.changedBody != null) put("body", delta.changedBody)
+          if (delta.changedState != null) put("state", delta.changedState)
+          if (delta.changedStateReason != null) put("state_reason", delta.changedStateReason)
+          if (delta.changedLabels != null) {
+            put("labels", JsonArray(delta.changedLabels.map(::JsonPrimitive)))
+          }
+          if (delta.changedAssignees != null) {
+            put("assignees", JsonArray(delta.changedAssignees.map(::JsonPrimitive)))
+          }
+          if (delta.milestoneChanged) {
+            if (delta.changedMilestoneNumber != null) put("milestone", delta.changedMilestoneNumber) else put("milestone", JsonNull)
+          }
+        }
+        if (patch.isNotEmpty()) {
+          applyIssuePatch(workingDir, local.repo, local.issueNumber, patch)
+        }
+        delta.appendedCommentBodies.forEach { body ->
+          addIssueComment(workingDir, local.repo, local.issueNumber, body)
+        }
+      }
+
+      val appliedMessage = if (request.dryRun) {
+        "Dry run; computed operations without writing"
+      } else {
+        "Applied ${operations.size} operation(s)"
+      }
+      issueResult(
+        status = "applied",
+        exitCode = 0,
+        syncId = local.syncId,
+        repo = local.repo,
+        issueNumber = local.issueNumber,
+        operations = operations,
+        message = appliedMessage
+      )
+    } catch (e: CliException) {
+      val exitCode = if (e.exitCode in listOf(2, 3)) e.exitCode else 1
+      issueResult(
+        status = if (exitCode == 2) "invalid" else if (exitCode == 3) "conflict" else "error",
+        exitCode = exitCode,
+        syncId = null,
+        repo = null,
+        issueNumber = null,
+        operations = emptyList(),
+        message = e.message ?: "Push failed"
+      )
+    } catch (e: Exception) {
+      issueResult(
+        status = "error",
+        exitCode = 1,
+        syncId = null,
+        repo = null,
+        issueNumber = null,
+        operations = emptyList(),
+        message = e.message ?: "Push failed"
+      )
+    }
+  }
+
   override fun searchPrs(workingDir: Path, issueKey: String): String {
     if (issueKey.isBlank()) throw CliException("Usage: egg gh search-prs ISSUE_KEY", 2)
     val query = "query(${'$'}q:String!){search(query:${'$'}q,type:ISSUE,first:100){nodes{... on PullRequest{number title headRefName baseRefName url repository{nameWithOwner}}}}}"
@@ -456,6 +660,284 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
         "--jq", "[.data.search.nodes[] | {number, title, headRefName, baseRefName, url, repository: .repository.nameWithOwner}]"
       )
     )
+  }
+
+  private fun fetchIssuesForRepo(workingDir: Path, repo: String, state: String): List<IssueSnapshot> {
+    val output = processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf(
+        "gh", "issue", "list",
+        "-R", repo,
+        "--state", state,
+        "--limit", "200",
+        "--json", "id,number,title,body,state,assignees,labels,milestone,url,author,createdAt,updatedAt,closedAt"
+      )
+    )
+    val root = json.parseToJsonElement(output)
+    val array = root as? JsonArray ?: throw CliException("Unexpected gh issue list payload", 1)
+    return array.map { issueElement ->
+      val base = parseIssueSnapshot(issueElement.jsonObject)
+      val comments = fetchIssueComments(workingDir, repo, base.number)
+      base.copy(comments = comments)
+    }
+  }
+
+  private fun fetchIssueByNumber(workingDir: Path, repo: String, issueNumber: Int): IssueSnapshot {
+    val output = processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf(
+        "gh", "issue", "view", issueNumber.toString(),
+        "-R", repo,
+        "--json", "id,number,title,body,state,assignees,labels,milestone,url,author,createdAt,updatedAt,closedAt"
+      )
+    )
+    val base = parseIssueSnapshot(json.parseToJsonElement(output).jsonObject)
+    val comments = fetchIssueComments(workingDir, repo, issueNumber)
+    return base.copy(comments = comments)
+  }
+
+  private fun fetchIssueComments(workingDir: Path, repo: String, issueNumber: Int): List<IssueCommentSnapshot> {
+    val comments = mutableListOf<IssueCommentSnapshot>()
+    var page = 1
+    while (true) {
+      val output = processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("gh", "api", "repos/$repo/issues/$issueNumber/comments?per_page=100&page=$page")
+      )
+      val root = json.parseToJsonElement(output)
+      val array = root as? JsonArray ?: throw CliException("Unexpected gh issue comments payload", 1)
+      val pageItems = array.map { parseIssueCommentSnapshot(it.jsonObject) }
+      comments += pageItems
+      if (pageItems.size < 100) break
+      page += 1
+    }
+    return comments
+  }
+
+  private fun parseIssueSnapshot(obj: JsonObject): IssueSnapshot {
+    val id = obj.pathString("id") ?: throw CliException("Issue snapshot missing id", 1)
+    val number = obj.pathInt("number") ?: throw CliException("Issue snapshot missing number", 1)
+    val title = obj.pathString("title") ?: ""
+    val body = obj.pathString("body") ?: ""
+    val state = obj.pathString("state")?.uppercase() ?: "OPEN"
+    val stateReason = obj.pathString("stateReason")?.uppercase()
+    val assignees = (obj.pathArray("assignees") ?: emptyList()).mapNotNull { assignee ->
+      assignee.jsonObject.pathString("login")
+    }
+    val labels = (obj.pathArray("labels") ?: emptyList()).mapNotNull { label ->
+      label.jsonObject.pathString("name")
+    }
+    val milestoneObj = obj.pathObject("milestone")
+    val milestoneNumber = milestoneObj?.pathInt("number")
+    val milestoneTitle = milestoneObj?.pathString("title")
+
+    return IssueSnapshot(
+      id = id,
+      number = number,
+      title = title,
+      body = body,
+      state = state,
+      stateReason = stateReason,
+      assignees = assignees.sorted(),
+      labels = labels.sorted(),
+      milestoneNumber = milestoneNumber,
+      milestoneTitle = milestoneTitle,
+      url = obj.pathString("url"),
+      author = obj.pathObject("author")?.pathString("login"),
+      createdAt = obj.pathString("createdAt"),
+      updatedAt = obj.pathString("updatedAt"),
+      closedAt = obj.pathString("closedAt"),
+      comments = emptyList(),
+      parentIssueNumber = null
+    )
+  }
+
+  private fun parseIssueCommentSnapshot(obj: JsonObject): IssueCommentSnapshot {
+    val id = obj.pathString("node_id") ?: obj.pathLong("id")?.toString() ?: obj.pathString("id")
+    return IssueCommentSnapshot(
+      id = id,
+      author = obj.pathObject("user")?.pathString("login") ?: obj.pathObject("author")?.pathString("login") ?: obj.pathString("author"),
+      body = obj.pathString("body") ?: "",
+      createdAt = obj.pathString("created_at") ?: obj.pathString("createdAt"),
+      updatedAt = obj.pathString("updated_at") ?: obj.pathString("updatedAt"),
+      url = obj.pathString("html_url") ?: obj.pathString("url")
+    )
+  }
+
+  private data class LocalIssueEntity(
+    val syncId: String,
+    val syncBase: String,
+    val repo: String,
+    val issueNumber: Int,
+    val issue: IssueSnapshot
+  )
+
+  private fun parseIssueEntity(workingDir: Path, entityJson: String, argRepo: String?, argIssue: String?): LocalIssueEntity {
+    if (entityJson.isBlank()) throw CliException("Push expects one JSON entity on stdin", 2)
+    val root = try {
+      json.parseToJsonElement(entityJson).jsonObject
+    } catch (_: SerializationException) {
+      throw CliException("Push expects one valid JSON entity on stdin", 2)
+    } catch (_: IllegalStateException) {
+      throw CliException("Push expects one JSON object entity on stdin", 2)
+    }
+
+    val sync = root.pathObject("_sync") ?: throw CliException("Missing _sync object", 2)
+    val syncId = sync.pathString("id") ?: throw CliException("Missing _sync.id", 2)
+    val syncBase = sync.pathString("base") ?: throw CliException("Missing _sync.base", 2)
+    if (!syncBase.startsWith("sha256:")) throw CliException("_sync.base must use sha256:<hex>", 2)
+
+    val entityRepo = argRepo ?: root.pathString("repo") ?: resolveRepo(workingDir)
+    val entityIssue = argIssue?.toIntOrNull()
+      ?: argIssue?.let { throw CliException("--issue must be an integer", 2) }
+      ?: root.pathInt("issueNumber")
+      ?: root.pathInt("number")
+      ?: root.pathObject("issue")?.pathInt("number")
+      ?: throw CliException("Missing issueNumber", 2)
+
+    val issueObj = root.pathObject("issue") ?: root
+    val issueId = issueObj.pathString("id") ?: throw CliException("Missing issue.id", 2)
+    if (issueId != syncId) throw CliException("issue.id must match _sync.id", 2)
+    val issueNumber = issueObj.pathInt("number") ?: throw CliException("Missing issue.number", 2)
+    if (issueNumber != entityIssue) throw CliException("issue.number must match issueNumber", 2)
+    val state = issueObj.pathString("state") ?: throw CliException("Missing issue.state", 2)
+
+    val assignees = (issueObj.pathArray("assignees") ?: throw CliException("Missing issue.assignees", 2)).map { element ->
+      val value = element as? JsonPrimitive ?: throw CliException("issue.assignees must be an array of strings", 2)
+      value.contentOrNull ?: throw CliException("issue.assignees must be an array of strings", 2)
+    }
+    val labels = (issueObj.pathArray("labels") ?: throw CliException("Missing issue.labels", 2)).map { element ->
+      val value = element as? JsonPrimitive ?: throw CliException("issue.labels must be an array of strings", 2)
+      value.contentOrNull ?: throw CliException("issue.labels must be an array of strings", 2)
+    }
+
+    val milestoneObj = issueObj.pathObject("milestone")
+    val milestoneNumber = when {
+      milestoneObj == null -> null
+      milestoneObj["number"] is JsonNull -> null
+      else -> milestoneObj.pathInt("number") ?: throw CliException("issue.milestone.number must be an integer", 2)
+    }
+
+    val relationshipObj = issueObj.pathObject("relationships")
+    val parentIssueNumber = relationshipObj?.pathInt("parentIssueNumber")
+    val comments = (issueObj.pathArray("comments") ?: emptyList()).map { element ->
+      val commentObj = element as? JsonObject ?: throw CliException("issue.comments must be an array of objects", 2)
+      val body = commentObj.pathString("body") ?: throw CliException("issue.comments[*].body must be a string", 2)
+      val commentId = commentObj.pathString("id") ?: commentObj.pathLong("id")?.toString()
+      IssueCommentSnapshot(
+        id = commentId,
+        author = commentObj.pathString("author"),
+        body = body,
+        createdAt = commentObj.pathString("createdAt"),
+        updatedAt = commentObj.pathString("updatedAt"),
+        url = commentObj.pathString("url")
+      )
+    }
+
+    return LocalIssueEntity(
+      syncId = syncId,
+      syncBase = syncBase,
+      repo = entityRepo,
+      issueNumber = entityIssue,
+      issue = IssueSnapshot(
+        id = issueId,
+        number = issueNumber,
+        title = issueObj.pathString("title") ?: throw CliException("Missing issue.title", 2),
+        body = issueObj.pathString("body") ?: "",
+        state = state,
+        stateReason = issueObj.pathString("stateReason"),
+        assignees = assignees,
+        labels = labels,
+        milestoneNumber = milestoneNumber,
+        milestoneTitle = milestoneObj?.pathString("title"),
+        url = issueObj.pathString("url"),
+        author = issueObj.pathString("author"),
+        createdAt = issueObj.pathString("createdAt"),
+        updatedAt = issueObj.pathString("updatedAt"),
+        closedAt = issueObj.pathString("closedAt"),
+        comments = comments,
+        parentIssueNumber = parentIssueNumber
+      )
+    )
+  }
+
+  private fun issueEntity(repo: String, issue: IssueSnapshot): JsonObject {
+    val base = IssueSyncFingerprint.compute(issue)
+    return buildJsonObject {
+      put("_sync", buildJsonObject {
+        put("id", issue.id)
+        put("base", base)
+      })
+      put("repo", repo)
+      put("issueNumber", issue.number)
+      put("id", issue.id)
+      put("number", issue.number)
+      put("title", issue.title)
+      put("body", issue.body)
+      put("state", issue.state)
+      if (issue.stateReason != null) put("stateReason", issue.stateReason) else put("stateReason", JsonNull)
+      if (issue.url != null) put("url", issue.url) else put("url", JsonNull)
+      if (issue.author != null) put("author", issue.author) else put("author", JsonNull)
+      if (issue.createdAt != null) put("createdAt", issue.createdAt) else put("createdAt", JsonNull)
+      if (issue.updatedAt != null) put("updatedAt", issue.updatedAt) else put("updatedAt", JsonNull)
+      if (issue.closedAt != null) put("closedAt", issue.closedAt) else put("closedAt", JsonNull)
+      put("assignees", buildJsonArray { issue.assignees.forEach { add(JsonPrimitive(it)) } })
+      put("labels", buildJsonArray { issue.labels.forEach { add(JsonPrimitive(it)) } })
+      put("comments", buildJsonArray {
+        issue.comments.forEach { comment ->
+          add(buildJsonObject {
+            if (comment.id != null) put("id", comment.id) else put("id", JsonNull)
+            if (comment.author != null) put("author", comment.author) else put("author", JsonNull)
+            put("body", comment.body)
+            if (comment.createdAt != null) put("createdAt", comment.createdAt) else put("createdAt", JsonNull)
+            if (comment.updatedAt != null) put("updatedAt", comment.updatedAt) else put("updatedAt", JsonNull)
+            if (comment.url != null) put("url", comment.url) else put("url", JsonNull)
+          })
+        }
+      })
+      put("milestone", if (issue.milestoneNumber == null) JsonNull else buildJsonObject {
+        put("number", issue.milestoneNumber)
+        if (issue.milestoneTitle != null) put("title", issue.milestoneTitle) else put("title", JsonNull)
+      })
+      put("relationships", buildJsonObject {
+        if (issue.parentIssueNumber != null) put("parentIssueNumber", issue.parentIssueNumber) else put("parentIssueNumber", JsonNull)
+        put("parentIssue", JsonNull)
+        put("subIssues", JsonArray(emptyList()))
+      })
+      put("references", buildJsonObject {
+        put("issues", JsonArray(emptyList()))
+        put("pullRequests", JsonArray(emptyList()))
+        put("commits", JsonArray(emptyList()))
+      })
+      put("associatedBranches", JsonArray(emptyList()))
+    }
+  }
+
+  private fun applyIssuePatch(workingDir: Path, repo: String, issueNumber: Int, patch: JsonObject) {
+    val tmpFile = Files.createTempFile("egg-issue-patch-", ".json")
+    try {
+      Files.writeString(tmpFile, patch.toString(), StandardOpenOption.TRUNCATE_EXISTING)
+      processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("gh", "api", "-X", "PATCH", "repos/$repo/issues/$issueNumber", "--input", tmpFile.toString())
+      )
+    } finally {
+      Files.deleteIfExists(tmpFile)
+    }
+  }
+
+  private fun addIssueComment(workingDir: Path, repo: String, issueNumber: Int, body: String) {
+    val tmpFile = Files.createTempFile("egg-issue-comment-", ".json")
+    try {
+      val payload = buildJsonObject { put("body", body) }
+      Files.writeString(tmpFile, payload.toString(), StandardOpenOption.TRUNCATE_EXISTING)
+      processRunner.runCaptureOrThrow(
+        workingDir,
+        listOf("gh", "api", "-X", "POST", "repos/$repo/issues/$issueNumber/comments", "--input", tmpFile.toString())
+      )
+    } finally {
+      Files.deleteIfExists(tmpFile)
+    }
   }
 
   override fun searchCode(workingDir: Path, queryParts: List<String>): String {
@@ -800,6 +1282,26 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
       put("message", message)
     }.toString()
     return ThreadPushResult(payload = payload, exitCode = exitCode)
+  }
+
+  private fun issueResult(
+    status: String,
+    exitCode: Int,
+    syncId: String?,
+    repo: String?,
+    issueNumber: Int?,
+    operations: List<JsonObject>,
+    message: String
+  ): IssuesPushResult {
+    val payload = buildJsonObject {
+      put("status", status)
+      if (syncId != null) put("syncId", syncId) else put("syncId", JsonNull)
+      if (repo != null) put("repo", repo) else put("repo", JsonNull)
+      if (issueNumber != null) put("issueNumber", issueNumber) else put("issueNumber", JsonNull)
+      put("operations", JsonArray(operations))
+      put("message", message)
+    }.toString()
+    return IssuesPushResult(payload = payload, exitCode = exitCode)
   }
 }
 

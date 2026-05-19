@@ -412,6 +412,219 @@ class GhCliGitHubApiTest {
     assertEquals(0, runner.commands.size)
   }
 
+  @Test
+  fun `issues pull emits sync entities`() {
+    val issueListResponse = """
+      [{"id":"I_1","number":12,"title":"Issue title","body":"Issue body","state":"OPEN","assignees":[{"login":"ben"}],"labels":[{"name":"nxt"}],"milestone":{"number":7,"title":"M1"},"url":"https://example.test/issues/12","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","closedAt":null}]
+    """.trimIndent()
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "issue", "list", "-R", "octo/repo", "--state", "open", "--limit", "200", "--json", "id,number,title,body,state,assignees,labels,milestone,url,author,createdAt,updatedAt,closedAt") to ProcessResult(0, issueListResponse, ""),
+        listOf("gh", "api", "repos/octo/repo/issues/12/comments?per_page=100&page=1") to ProcessResult(0, "[]", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val payload = api.issuesPull(
+      java.nio.file.Path.of("."),
+      IssuesPullRequest(repo = "octo/repo", issue = null, state = "open", json = true)
+    )
+
+    assertTrue(payload.contains("\"issues\":[{"))
+    assertTrue(payload.contains("\"repo\":\"octo/repo\""))
+    assertTrue(payload.contains("\"issueNumber\":12"))
+    assertTrue(payload.contains("\"number\":12"))
+    assertTrue(payload.contains("\"_sync\":{"))
+    assertEquals(2, runner.commands.size)
+  }
+
+  @Test
+  fun `issues push applies patch operation`() {
+    val issueViewResponse = """
+      {"id":"I_1","number":12,"title":"Old title","body":"Body","state":"OPEN","assignees":[{"login":"ben"}],"labels":[{"name":"nxt"}],"milestone":null,"url":"https://example.test/issues/12","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","closedAt":null}
+    """.trimIndent()
+    val base = IssueSyncFingerprint.compute(
+      IssueSnapshot(
+        id = "I_1",
+        number = 12,
+        title = "Old title",
+        body = "Body",
+        state = "OPEN",
+        stateReason = null,
+        assignees = listOf("ben"),
+        labels = listOf("nxt"),
+        milestoneNumber = null,
+        milestoneTitle = null,
+        url = "https://example.test/issues/12",
+        author = "alice",
+        createdAt = "2026-01-01T00:00:00Z",
+        updatedAt = "2026-01-01T00:00:01Z",
+        closedAt = null,
+        comments = emptyList(),
+        parentIssueNumber = null
+      )
+    )
+    val runner = QueueResponseRunner(
+      listOf(
+        ProcessResult(0, "octo/repo", ""),
+        ProcessResult(0, issueViewResponse, ""),
+        ProcessResult(0, "[]", ""),
+        ProcessResult(0, "{}", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"I_1","base":"$base"},"issueNumber":12,"issue":{"id":"I_1","number":12,"title":"New title","body":"Body","state":"OPEN","stateReason":null,"assignees":["ben"],"labels":["nxt"],"milestone":null}}
+    """.trimIndent()
+    val result = api.issuesPush(
+      java.nio.file.Path.of("."),
+      IssuesPushRequest(repo = null, issue = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"status\":\"applied\""))
+    assertTrue(result.payload.contains("\"type\":\"update-title\""))
+    assertTrue(runner.commands.any { it.take(5) == listOf("gh", "api", "-X", "PATCH", "repos/octo/repo/issues/12") })
+  }
+
+  @Test
+  fun `issues pull includes comments in emitted entity`() {
+    val issueListResponse = """
+      [{"id":"I_1","number":12,"title":"Issue title","body":"Issue body","state":"OPEN","assignees":[],"labels":[],"milestone":null,"url":"https://example.test/issues/12","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","closedAt":null}]
+    """.trimIndent()
+    val commentsResponse = """
+      [{"node_id":"IC_1","body":"First comment","created_at":"2026-01-01T00:10:00Z","updated_at":"2026-01-01T00:10:00Z","html_url":"https://example.test/issues/12#issuecomment-1","user":{"login":"ben"}}]
+    """.trimIndent()
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "issue", "list", "-R", "octo/repo", "--state", "open", "--limit", "200", "--json", "id,number,title,body,state,assignees,labels,milestone,url,author,createdAt,updatedAt,closedAt") to ProcessResult(0, issueListResponse, ""),
+        listOf("gh", "api", "repos/octo/repo/issues/12/comments?per_page=100&page=1") to ProcessResult(0, commentsResponse, "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val payload = api.issuesPull(
+      java.nio.file.Path.of("."),
+      IssuesPullRequest(repo = "octo/repo", issue = null, state = "open", json = true)
+    )
+
+    assertTrue(payload.contains("\"comments\":[{"))
+    assertTrue(payload.contains("\"id\":\"IC_1\""))
+    assertTrue(payload.contains("\"body\":\"First comment\""))
+  }
+
+  @Test
+  fun `issues push appends new issue comment`() {
+    val issueViewResponse = """
+      {"id":"I_1","number":12,"title":"Old title","body":"Body","state":"OPEN","assignees":[],"labels":[],"milestone":null,"url":"https://example.test/issues/12","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","closedAt":null}
+    """.trimIndent()
+    val commentsResponse = """
+      [{"node_id":"IC_1","body":"Existing","created_at":"2026-01-01T00:10:00Z","updated_at":"2026-01-01T00:10:00Z","html_url":"https://example.test/issues/12#issuecomment-1","user":{"login":"ben"}}]
+    """.trimIndent()
+    val base = IssueSyncFingerprint.compute(
+      IssueSnapshot(
+        id = "I_1",
+        number = 12,
+        title = "Old title",
+        body = "Body",
+        state = "OPEN",
+        stateReason = null,
+        assignees = emptyList(),
+        labels = emptyList(),
+        milestoneNumber = null,
+        milestoneTitle = null,
+        url = "https://example.test/issues/12",
+        author = "alice",
+        createdAt = "2026-01-01T00:00:00Z",
+        updatedAt = "2026-01-01T00:00:01Z",
+        closedAt = null,
+        comments = listOf(
+          IssueCommentSnapshot(
+            id = "IC_1",
+            author = "ben",
+            body = "Existing",
+            createdAt = "2026-01-01T00:10:00Z",
+            updatedAt = "2026-01-01T00:10:00Z",
+            url = "https://example.test/issues/12#issuecomment-1"
+          )
+        ),
+        parentIssueNumber = null
+      )
+    )
+    val runner = QueueResponseRunner(
+      listOf(
+        ProcessResult(0, "octo/repo", ""),
+        ProcessResult(0, issueViewResponse, ""),
+        ProcessResult(0, commentsResponse, ""),
+        ProcessResult(0, "{}", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"I_1","base":"$base"},"issueNumber":12,"issue":{"id":"I_1","number":12,"title":"Old title","body":"Body","state":"OPEN","stateReason":null,"assignees":[],"labels":[],"milestone":null,"comments":[{"id":"IC_1","author":"ben","body":"Existing","createdAt":"2026-01-01T00:10:00Z","updatedAt":"2026-01-01T00:10:00Z","url":"https://example.test/issues/12#issuecomment-1"},{"body":"New local comment"}]}}
+    """.trimIndent()
+    val result = api.issuesPush(
+      java.nio.file.Path.of("."),
+      IssuesPushRequest(repo = null, issue = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"status\":\"applied\""))
+    assertTrue(result.payload.contains("\"type\":\"reply-comment\""))
+    assertTrue(runner.commands.any { it.take(5) == listOf("gh", "api", "-X", "POST", "repos/octo/repo/issues/12/comments") })
+  }
+
+  @Test
+  fun `issues push accepts flat entity payload`() {
+    val issueViewResponse = """
+      {"id":"I_1","number":12,"title":"Old title","body":"Body","state":"OPEN","assignees":[],"labels":[],"milestone":null,"url":"https://example.test/issues/12","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","closedAt":null}
+    """.trimIndent()
+    val base = IssueSyncFingerprint.compute(
+      IssueSnapshot(
+        id = "I_1",
+        number = 12,
+        title = "Old title",
+        body = "Body",
+        state = "OPEN",
+        stateReason = null,
+        assignees = emptyList(),
+        labels = emptyList(),
+        milestoneNumber = null,
+        milestoneTitle = null,
+        url = "https://example.test/issues/12",
+        author = "alice",
+        createdAt = "2026-01-01T00:00:00Z",
+        updatedAt = "2026-01-01T00:00:01Z",
+        closedAt = null,
+        comments = emptyList(),
+        parentIssueNumber = null
+      )
+    )
+    val runner = QueueResponseRunner(
+      listOf(
+        ProcessResult(0, "octo/repo", ""),
+        ProcessResult(0, issueViewResponse, ""),
+        ProcessResult(0, "[]", ""),
+        ProcessResult(0, "{}", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val entity = """
+      {"_sync":{"id":"I_1","base":"$base"},"issueNumber":12,"id":"I_1","number":12,"title":"New title","body":"Body","state":"OPEN","stateReason":null,"assignees":[],"labels":[],"milestone":null}
+    """.trimIndent()
+    val result = api.issuesPush(
+      java.nio.file.Path.of("."),
+      IssuesPushRequest(repo = null, issue = null, dryRun = false, json = true, entityJson = entity)
+    )
+
+    assertEquals(0, result.exitCode)
+    assertTrue(result.payload.contains("\"status\":\"applied\""))
+    assertTrue(result.payload.contains("\"type\":\"update-title\""))
+  }
+
   private class RecordingProcessRunner(
     private val responses: Map<List<String>, ProcessResult>
   ) : ProcessRunner {
