@@ -1,14 +1,29 @@
 package cn.varsa.egg.commands
 
 import cn.varsa.cli.core.CliException
+import cn.varsa.egg.ci.CiStatusRequest
 import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.git.RewordRequest
-import cn.varsa.egg.github.ReplyRequest
-import cn.varsa.egg.github.ResolveRequest
 import cn.varsa.egg.github.IssuesPullRequest
 import cn.varsa.egg.github.IssuesPushRequest
+import cn.varsa.egg.github.ReplyRequest
+import cn.varsa.egg.github.ResolveRequest
 import cn.varsa.egg.github.ThreadPullRequest
 import cn.varsa.egg.github.ThreadPushRequest
+
+object CiStatusArgsParser {
+  fun parse(args: Array<String>): CiStatusRequest {
+    if (args.size > 2) throw CliException("Usage: egg ci status [<job/repo>] [<branch/pr>]", 2)
+    if (args.isEmpty()) return CiStatusRequest(jobOrRepo = null, branchOrPr = null)
+    if (args.size == 2) return CiStatusRequest(jobOrRepo = args[0], branchOrPr = args[1])
+
+    val arg = args[0]
+    if (arg.matches(Regex("(?i)^pr-\\d+$")) || arg.matches(Regex("^\\d+$"))) {
+      return CiStatusRequest(jobOrRepo = null, branchOrPr = arg)
+    }
+    return CiStatusRequest(jobOrRepo = arg, branchOrPr = null)
+  }
+}
 
 object ReplyArgsParser {
   fun parse(args: Array<String>): ReplyRequest {

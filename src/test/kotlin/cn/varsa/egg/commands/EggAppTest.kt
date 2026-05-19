@@ -1,6 +1,8 @@
 package cn.varsa.egg.commands
 
 import cn.varsa.cli.core.CliMain
+import cn.varsa.egg.ci.CiApi
+import cn.varsa.egg.ci.CiStatusRequest
 import cn.varsa.egg.git.GitApi
 import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.git.RewordRequest
@@ -189,6 +191,26 @@ class EggAppTest {
   }
 
   @Test
+  fun `ci status forwards args to ci api`() {
+    val fakeCiApi = FakeCiApi(statusResult = "Pipeline: SUCCESS")
+    val output = BufferedOutput()
+    val app = EggApp(gitHubApi = FakeGitHubApi(), gitApi = NoopGitApi(), ciApi = fakeCiApi, output = output)
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("ci", "status", "knime-gateway", "PR-79"))
+
+    assertEquals(0, exitCode)
+    assertEquals(listOf("Pipeline: SUCCESS"), output.lines())
+    assertEquals(CiStatusRequest(jobOrRepo = "knime-gateway", branchOrPr = "PR-79"), fakeCiApi.lastStatusRequest)
+  }
+
+  @Test
+  fun `ci status parser supports missing positional args`() {
+    assertEquals(CiStatusRequest(jobOrRepo = null, branchOrPr = null), CiStatusArgsParser.parse(emptyArray()))
+    assertEquals(CiStatusRequest(jobOrRepo = "knime-gateway", branchOrPr = null), CiStatusArgsParser.parse(arrayOf("knime-gateway")))
+    assertEquals(CiStatusRequest(jobOrRepo = null, branchOrPr = "79"), CiStatusArgsParser.parse(arrayOf("79")))
+  }
+
+  @Test
   fun `reword command forwards parsed request to git api`() {
     val output = BufferedOutput()
     val gitApi = NoopGitApi()
@@ -310,6 +332,15 @@ class EggAppTest {
 
     override fun reword(workingDir: java.nio.file.Path, request: RewordRequest) {
       lastRewordRequest = request
+    }
+  }
+
+  private class FakeCiApi(private val statusResult: String = "") : CiApi {
+    var lastStatusRequest: CiStatusRequest? = null
+
+    override fun status(workingDir: java.nio.file.Path, request: CiStatusRequest): String {
+      lastStatusRequest = request
+      return statusResult
     }
   }
 }

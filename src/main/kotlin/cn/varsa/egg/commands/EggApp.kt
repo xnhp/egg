@@ -5,6 +5,8 @@ import cn.varsa.cli.core.CliCompletion
 import cn.varsa.cli.core.CliCommandGroup
 import cn.varsa.cli.core.CliDsl
 import cn.varsa.cli.core.CliException
+import cn.varsa.egg.ci.CiApi
+import cn.varsa.egg.ci.UnsupportedCiApi
 import cn.varsa.egg.git.GitApi
 import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.github.GitHubApi
@@ -14,6 +16,7 @@ import java.nio.file.Path
 class EggApp(
   private val gitHubApi: GitHubApi,
   private val gitApi: GitApi,
+  private val ciApi: CiApi = UnsupportedCiApi,
   private val output: Output,
   private val workingDirProvider: () -> Path = { Path.of(".").toAbsolutePath().normalize() },
   private val stdinProvider: () -> String = { System.`in`.bufferedReader().readText() }
@@ -21,7 +24,22 @@ class EggApp(
   fun commandTree(): CliCommandGroup = CliDsl.group(
     name = "egg",
     description = "Unified CLI for GitHub and git helpers",
-    children = listOf(ghGroup(), gitGroup(), completionGroup(), completeLeaf())
+    children = listOf(ghGroup(), ciGroup(), gitGroup(), completionGroup(), completeLeaf())
+  )
+
+  private fun ciGroup() = CliDsl.group(
+    name = "ci",
+    description = "CI helpers",
+    children = listOf(
+      outputLeaf(
+        name = "status",
+        description = "Show Jenkins pipeline status",
+        handler = { wd, args ->
+          val request = CiStatusArgsParser.parse(args)
+          ciApi.status(wd, request)
+        }
+      )
+    )
   )
 
   private fun completionGroup() = CliDsl.group(
