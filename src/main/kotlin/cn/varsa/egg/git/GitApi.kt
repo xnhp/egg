@@ -51,6 +51,9 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
     val branchDirName = branch.replace('/', '_')
     val worktreePath = workingDir.resolve("${repoName}_$branchDirName").normalize()
 
+    println("[INFO] Fetching latest changes from origin for $repoName at $repoPath")
+    processRunner.runCaptureOrThrow(repoPath, listOf("git", "fetch", "--quiet", "origin"))
+
     val hasLocalBranch = processRunner.run(repoPath, listOf("git", "show-ref", "--verify", "--quiet", "refs/heads/$branch")).exitCode == 0
     val hasRemoteBranch = processRunner.run(repoPath, listOf("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/$branch")).exitCode == 0
 
@@ -477,6 +480,9 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
   }
 
   private fun defaultBaseRef(repoPath: Path): String {
+    val hasOriginMaster = processRunner.run(repoPath, listOf("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/master")).exitCode == 0
+    if (hasOriginMaster) return "origin/master"
+
     val originHead = runOrEmpty(repoPath, listOf("git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"))
       .removePrefix("origin/")
     if (originHead.isNotBlank()) {

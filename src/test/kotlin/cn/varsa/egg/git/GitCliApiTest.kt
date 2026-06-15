@@ -30,11 +30,45 @@ class GitCliApiTest {
 
     api.makeWorktree(Path("/tmp/wt"), repoName = "knime-ui", branch = "enh/NXT-4439", subdir = null, override = true)
 
+    assertTrue(runner.commands.contains(listOf("git", "fetch", "--quiet", "origin")))
     assertTrue(
       runner.commands.contains(
         listOf("git", "worktree", "add", "-f", "/tmp/wt/knime-ui_enh_NXT-4439", "enh/NXT-4439")
       )
     )
+  }
+
+  @Test
+  fun `make worktree seeds new branch from origin master`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("git", "show-ref", "--verify", "--quiet", "refs/heads/enh/NXT-5000") to ProcessResult(1, "", ""),
+        listOf("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/enh/NXT-5000") to ProcessResult(1, "", ""),
+        listOf("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/master") to ProcessResult(0, "", "")
+      )
+    )
+    val api = GitCliApi(runner)
+
+    val oldOut = System.out
+    val out = ByteArrayOutputStream()
+    val repoPath = java.nio.file.Path.of(System.getProperty("user.home"), "repos", "knime-ui")
+    try {
+      System.setOut(PrintStream(out))
+      api.makeWorktree(Path("/tmp/wt"), repoName = "knime-ui", branch = "enh/NXT-5000", subdir = null, override = false)
+    } finally {
+      System.setOut(oldOut)
+    }
+
+    val output = out.toString()
+    assertTrue(output.contains("[INFO] Fetching latest changes from origin for knime-ui"))
+    assertTrue(output.contains(repoPath.toString()))
+
+    val addCommand = listOf("git", "worktree", "add", "-b", "enh/NXT-5000", "/tmp/wt/knime-ui_enh_NXT-5000", "origin/master")
+    val fetchIndex = runner.commands.indexOf(listOf("git", "fetch", "--quiet", "origin"))
+    val addIndex = runner.commands.indexOf(addCommand)
+    assertTrue(fetchIndex >= 0)
+    assertTrue(addIndex >= 0)
+    assertTrue(fetchIndex < addIndex)
   }
 
   @Test
