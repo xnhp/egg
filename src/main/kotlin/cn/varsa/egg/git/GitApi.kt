@@ -122,8 +122,9 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
 
   override fun changedPaths(workingDir: Path, staged: Boolean, range: String?): String {
     val repo = processRunner.runCaptureOrThrow(workingDir, listOf("git", "rev-parse", "--show-toplevel"))
+    val resolvedRange = resolveChangedPathsRange(workingDir, range)
     val diffCommand = when {
-      !range.isNullOrBlank() -> listOf("git", "diff", "--name-only", "-z", range)
+      !resolvedRange.isNullOrBlank() -> listOf("git", "diff", "--name-only", "-z", resolvedRange)
       staged -> listOf("git", "diff", "--name-only", "-z", "--cached")
       else -> listOf("git", "diff", "--name-only", "-z")
     }
@@ -134,6 +135,25 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       .asSequence()
       .filter { it.isNotBlank() }
       .joinToString("\n") { "$repo/$it" }
+  }
+
+  private fun resolveChangedPathsRange(workingDir: Path, range: String?): String? {
+    return when (range) {
+      "feature" -> {
+        val upstream = processRunner.runCaptureOrThrow(
+          workingDir,
+          listOf("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+        )
+        val remote = upstream.substringBefore('/').takeIf { it != upstream } ?: "origin"
+        processRunner.runCaptureOrThrow(workingDir, listOf("git", "fetch", "--quiet", remote))
+        "@{upstream}"
+      }
+      "master" -> {
+        processRunner.runCaptureOrThrow(workingDir, listOf("git", "fetch", "--quiet", "origin"))
+        "origin/master"
+      }
+      else -> range
+    }
   }
 
   override fun localIgnore(workingDir: Path, pattern: String): String {

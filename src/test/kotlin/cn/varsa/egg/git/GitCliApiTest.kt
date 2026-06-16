@@ -124,6 +124,56 @@ class GitCliApiTest {
   }
 
   @Test
+  fun `changed paths feature fetches upstream remote and compares with upstream`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("git", "rev-parse", "--show-toplevel") to ProcessResult(0, "/repo", ""),
+        listOf("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}") to ProcessResult(0, "upstream/enh/NXT-1", ""),
+        listOf("git", "fetch", "--quiet", "upstream") to ProcessResult(0, "", ""),
+        listOf("git", "diff", "--name-only", "-z", "@{upstream}") to ProcessResult(0, "a.txt\u0000", "")
+      )
+    )
+    val api = GitCliApi(runner)
+
+    val output = api.changedPaths(java.nio.file.Path.of("."), staged = false, range = "feature")
+
+    assertEquals("/repo/a.txt", output)
+    assertEquals(
+      listOf(
+        listOf("git", "rev-parse", "--show-toplevel"),
+        listOf("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"),
+        listOf("git", "fetch", "--quiet", "upstream"),
+        listOf("git", "diff", "--name-only", "-z", "@{upstream}")
+      ),
+      runner.commands
+    )
+  }
+
+  @Test
+  fun `changed paths master fetches origin and compares with origin master`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("git", "rev-parse", "--show-toplevel") to ProcessResult(0, "/repo", ""),
+        listOf("git", "fetch", "--quiet", "origin") to ProcessResult(0, "", ""),
+        listOf("git", "diff", "--name-only", "-z", "origin/master") to ProcessResult(0, "b.txt\u0000", "")
+      )
+    )
+    val api = GitCliApi(runner)
+
+    val output = api.changedPaths(java.nio.file.Path.of("."), staged = false, range = "master")
+
+    assertEquals("/repo/b.txt", output)
+    assertEquals(
+      listOf(
+        listOf("git", "rev-parse", "--show-toplevel"),
+        listOf("git", "fetch", "--quiet", "origin"),
+        listOf("git", "diff", "--name-only", "-z", "origin/master")
+      ),
+      runner.commands
+    )
+  }
+
+  @Test
   fun `generate commit message extracts text event payload`() {
     val runner = RecordingProcessRunner(
       fallback = { command ->
