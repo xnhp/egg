@@ -39,7 +39,7 @@ class GitCliApiTest {
   }
 
   @Test
-  fun `make worktree seeds new branch from origin master`() {
+  fun `make worktree seeds new branch from origin master and tracks matching origin branch`() {
     val runner = RecordingProcessRunner(
       responses = mapOf(
         listOf("git", "show-ref", "--verify", "--quiet", "refs/heads/enh/NXT-5000") to ProcessResult(1, "", ""),
@@ -64,11 +64,19 @@ class GitCliApiTest {
     assertTrue(output.contains(repoPath.toString()))
 
     val addCommand = listOf("git", "worktree", "add", "-b", "enh/NXT-5000", "/tmp/wt/knime-ui_enh_NXT-5000", "origin/master")
+    val remoteConfigCommand = listOf("git", "config", "branch.enh/NXT-5000.remote", "origin")
+    val mergeConfigCommand = listOf("git", "config", "branch.enh/NXT-5000.merge", "refs/heads/enh/NXT-5000")
     val fetchIndex = runner.commands.indexOf(listOf("git", "fetch", "--quiet", "origin"))
     val addIndex = runner.commands.indexOf(addCommand)
+    val remoteConfigIndex = runner.commands.indexOf(remoteConfigCommand)
+    val mergeConfigIndex = runner.commands.indexOf(mergeConfigCommand)
     assertTrue(fetchIndex >= 0)
     assertTrue(addIndex >= 0)
+    assertTrue(remoteConfigIndex >= 0)
+    assertTrue(mergeConfigIndex >= 0)
     assertTrue(fetchIndex < addIndex)
+    assertTrue(addIndex < remoteConfigIndex)
+    assertTrue(remoteConfigIndex < mergeConfigIndex)
   }
 
   @Test

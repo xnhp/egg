@@ -69,6 +69,7 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       else -> {
         val baseRef = defaultBaseRef(repoPath)
         processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), baseRef))
+        configureUpstream(repoPath, branch)
       }
     }
 
@@ -495,6 +496,11 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       if (hasHead) return headRef
     }
     return processRunner.runCaptureOrThrow(repoPath, listOf("git", "rev-parse", "--verify", "HEAD"))
+  }
+
+  private fun configureUpstream(repoPath: Path, branch: String) {
+    processRunner.runCaptureOrThrow(repoPath, listOf("git", "config", "branch.$branch.remote", "origin"))
+    processRunner.runCaptureOrThrow(repoPath, listOf("git", "config", "branch.$branch.merge", "refs/heads/$branch"))
   }
 
   private fun runOrEmpty(workingDir: Path, command: List<String>): String {
