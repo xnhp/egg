@@ -5,6 +5,8 @@ import cn.varsa.cli.core.CliCompletion
 import cn.varsa.cli.core.CliCommandGroup
 import cn.varsa.cli.core.CliDsl
 import cn.varsa.cli.core.CliException
+import cn.varsa.egg.EggMcpServerConfig
+import cn.varsa.egg.runEggMcpServer
 import cn.varsa.egg.ci.CiApi
 import cn.varsa.egg.ci.UnsupportedCiApi
 import cn.varsa.egg.git.GitApi
@@ -14,17 +16,17 @@ import cn.varsa.egg.output.Output
 import java.nio.file.Path
 
 class EggApp(
-  private val gitHubApi: GitHubApi,
-  private val gitApi: GitApi,
-  private val ciApi: CiApi = UnsupportedCiApi,
-  private val output: Output,
-  private val workingDirProvider: () -> Path = { Path.of(".").toAbsolutePath().normalize() },
+  internal val gitHubApi: GitHubApi,
+  internal val gitApi: GitApi,
+  internal val ciApi: CiApi = UnsupportedCiApi,
+  internal val output: Output,
+  internal val workingDirProvider: () -> Path = { Path.of(".").toAbsolutePath().normalize() },
   private val stdinProvider: () -> String = { System.`in`.bufferedReader().readText() }
 ) {
   fun commandTree(): CliCommandGroup = CliDsl.group(
     name = "egg",
     description = "Unified CLI for GitHub and git helpers",
-    children = listOf(ghGroup(), ciGroup(), gitGroup(), completionGroup(), completeLeaf())
+    children = listOf(ghGroup(), ciGroup(), gitGroup(), completionGroup(), mcpLeaf(), completeLeaf())
   )
 
   private fun ciGroup() = CliDsl.group(
@@ -61,6 +63,15 @@ class EggApp(
     mixinStandardHelpOptions = true
   ) { args ->
     CliCompletion.suggest(commandTree(), args.toList()).joinToString("\n")
+  }
+
+  private fun mcpLeaf() = CliDsl.action(
+    name = "mcp",
+    description = "Run MCP server exposing Egg CLI commands as tools",
+    mixinStandardHelpOptions = false
+  ) { args ->
+    CliArgs.requireArgCount(args, 0, "egg mcp")
+    runEggMcpServer(EggMcpServerConfig.fromEnvironment())
   }
 
   private fun ghGroup() = CliDsl.group(

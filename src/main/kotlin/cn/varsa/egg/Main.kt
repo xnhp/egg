@@ -1,30 +1,46 @@
 package cn.varsa.egg
 
 import cn.varsa.cli.core.CliMain
+import cn.varsa.cli.core.CliMcpRegistrationConfig
 import cn.varsa.egg.ci.JenkinsCiApi
 import cn.varsa.egg.commands.EggApp
 import cn.varsa.egg.git.GitCliApi
 import cn.varsa.egg.github.GhCliGitHubApi
+import cn.varsa.egg.output.Output
 import cn.varsa.egg.output.StdOutput
 import cn.varsa.egg.runtime.SystemProcessRunner
+import io.modelcontextprotocol.kotlin.sdk.server.Server
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 
 fun main(args: Array<String>) {
   loadDotEnv()
-  val processRunner = SystemProcessRunner()
-  val gitHubApi = GhCliGitHubApi(processRunner)
-  val gitApi = GitCliApi(processRunner)
-  val ciApi = JenkinsCiApi(processRunner)
-  val app = EggApp(gitHubApi = gitHubApi, gitApi = gitApi, ciApi = ciApi, output = StdOutput())
+  val app = createEggApp()
   val exitCode = CliMain.run(app.commandTree(), args)
   if (exitCode != 0) {
     System.exit(exitCode)
   }
 }
 
-private fun loadDotEnv() {
+fun createEggApp(
+  processRunner: SystemProcessRunner = SystemProcessRunner(),
+  output: Output = StdOutput()
+): EggApp {
+  val gitHubApi = GhCliGitHubApi(processRunner)
+  val gitApi = GitCliApi(processRunner)
+  val ciApi = JenkinsCiApi(processRunner)
+  return EggApp(gitHubApi = gitHubApi, gitApi = gitApi, ciApi = ciApi, output = output)
+}
+
+fun Server.registerEggTools(
+  app: EggApp,
+  config: CliMcpRegistrationConfig = CliMcpRegistrationConfig()
+) {
+  this.registerEggWorkflowTools(app, config)
+}
+
+fun loadDotEnv() {
   val values = mutableMapOf<String, String>()
   dotenvCandidates().forEach { file ->
     if (!Files.isRegularFile(file)) return@forEach
