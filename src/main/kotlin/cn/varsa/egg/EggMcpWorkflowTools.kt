@@ -31,7 +31,7 @@ fun Server.registerEggWorkflowTools(
   registerCliTools(app.mcpWorkflowCommand(), config)
 }
 
-private fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
+internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
   name = "egg",
   description = "Egg MCP workflow tools",
   children = listOf(

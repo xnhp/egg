@@ -15,11 +15,6 @@ dependencies {
   implementation(kotlin("stdlib"))
   implementation("cn.varsa:cli-core:0.1.0-SNAPSHOT")
   implementation("io.modelcontextprotocol:kotlin-sdk-server:0.13.0")
-  implementation(platform("io.ktor:ktor-bom:3.4.3"))
-  implementation("io.ktor:ktor-server-core")
-  implementation("io.ktor:ktor-server-cio")
-  implementation("io.ktor:ktor-server-content-negotiation")
-  implementation("io.ktor:ktor-server-cors")
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
   testImplementation(kotlin("test"))
 }

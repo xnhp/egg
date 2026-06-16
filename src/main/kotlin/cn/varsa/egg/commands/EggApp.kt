@@ -5,7 +5,6 @@ import cn.varsa.cli.core.CliCompletion
 import cn.varsa.cli.core.CliCommandGroup
 import cn.varsa.cli.core.CliDsl
 import cn.varsa.cli.core.CliException
-import cn.varsa.egg.EggMcpServerConfig
 import cn.varsa.egg.runEggMcpServer
 import cn.varsa.egg.ci.CiApi
 import cn.varsa.egg.ci.UnsupportedCiApi
@@ -67,11 +66,11 @@ class EggApp(
 
   private fun mcpLeaf() = CliDsl.action(
     name = "mcp",
-    description = "Run MCP server exposing Egg CLI commands as tools",
+    description = "Run MCP server over stdin/stdout exposing Egg workflow tools",
     mixinStandardHelpOptions = false
   ) { args ->
     CliArgs.requireArgCount(args, 0, "egg mcp")
-    runEggMcpServer(EggMcpServerConfig.fromEnvironment())
+    runEggMcpServer(this)
   }
 
   private fun ghGroup() = CliDsl.group(
