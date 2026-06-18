@@ -947,11 +947,38 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   override fun look(workingDir: Path, repo: String, path: String, ref: String?): String {
     val resolvedRef = ref ?: "master"
-    val contentBase64 = processRunner.runCaptureOrThrow(
-      workingDir,
-      listOf("gh", "api", "repos/$repo/contents/$path?ref=$resolvedRef", "--jq", ".content")
-    )
-    return String(Base64.getMimeDecoder().decode(contentBase64))
+    val apiPath = "repos/$repo/contents/$path?ref=$resolvedRef"
+    val result = processRunner.run(workingDir, listOf("gh", "api", apiPath, "--jq", ".content"))
+    if (result.exitCode != 0) {
+      throw CliException(githubFileLookupError(repo, path, resolvedRef, apiPath, result.stdout, result.stderr), result.exitCode)
+    }
+    val contentBase64 = result.stdout.trim()
+    if (contentBase64.isBlank() || contentBase64 == "null") {
+      throw CliException(githubFileLookupError(repo, path, resolvedRef, apiPath, result.stdout, result.stderr), 1)
+    }
+    return try {
+      String(Base64.getMimeDecoder().decode(contentBase64))
+    } catch (e: IllegalArgumentException) {
+      throw CliException(
+        "Could not decode GitHub file content for $repo:$path at ref $resolvedRef\n" +
+          "GitHub API path: $apiPath\n" +
+          "The contents API response did not contain valid base64 file content.",
+        1
+      )
+    }
+  }
+
+  private fun githubFileLookupError(repo: String, path: String, ref: String, apiPath: String, stdout: String, stderr: String): String {
+    val details = listOf(stdout, stderr).filter { it.isNotBlank() }.joinToString("\n")
+    return buildString {
+      append("Could not read GitHub file $repo:$path at ref $ref")
+      append("\nGitHub API path: $apiPath")
+      if (details.isNotBlank()) {
+        append("\n")
+        append(details)
+      }
+      append("\nPossible causes: the file path or ref does not exist, the path is a directory, or the repository is inaccessible.")
+    }
   }
 
   override fun lookWeb(workingDir: Path, repo: String, path: String, ref: String?) {

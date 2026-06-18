@@ -1,9 +1,11 @@
 package cn.varsa.egg.github
 
+import cn.varsa.cli.core.CliException
 import cn.varsa.egg.runtime.ProcessResult
 import cn.varsa.egg.runtime.ProcessRunner
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class GhCliGitHubApiTest {
@@ -56,6 +58,26 @@ class GhCliGitHubApiTest {
     val output = api.currentPrReviewStatus(java.nio.file.Path.of("."), json = true)
 
     assertEquals("[]", output)
+  }
+
+  @Test
+  fun `look reports repo path and ref when contents api fails`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "api", "repos/octo/repo/contents/src/Missing.kt?ref=main", "--jq", ".content") to
+          ProcessResult(1, "{\"message\":\"Not Found\"}", "gh: Not Found (HTTP 404)")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val error = assertFailsWith<CliException> {
+      api.look(java.nio.file.Path.of("."), repo = "octo/repo", path = "src/Missing.kt", ref = "main")
+    }
+
+    assertEquals(1, error.exitCode)
+    assertTrue(error.message.orEmpty().contains("Could not read GitHub file octo/repo:src/Missing.kt at ref main"))
+    assertTrue(error.message.orEmpty().contains("repos/octo/repo/contents/src/Missing.kt?ref=main"))
+    assertTrue(error.message.orEmpty().contains("gh: Not Found (HTTP 404)"))
   }
 
   @Test
