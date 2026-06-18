@@ -111,6 +111,8 @@ class EggApp(
         }
       }
     }
+
+    ${mcpWorkflowCommand().cliMcpToolsListText()}
   """.trimIndent()
 
   private fun ghGroup() = CliDsl.group(
