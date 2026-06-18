@@ -3,8 +3,11 @@ package cn.varsa.egg.commands
 import cn.varsa.cli.core.CliArgs
 import cn.varsa.cli.core.CliCompletion
 import cn.varsa.cli.core.CliCommandGroup
+import cn.varsa.cli.core.CliCommandLeaf
 import cn.varsa.cli.core.CliDsl
 import cn.varsa.cli.core.CliException
+import cn.varsa.cli.core.cliMcpToolsListText
+import cn.varsa.egg.mcpWorkflowCommand
 import cn.varsa.egg.runEggMcpServer
 import cn.varsa.egg.ci.CiApi
 import cn.varsa.egg.ci.UnsupportedCiApi
@@ -64,14 +67,51 @@ class EggApp(
     CliCompletion.suggest(commandTree(), args.toList()).joinToString("\n")
   }
 
-  private fun mcpLeaf() = CliDsl.action(
+  private fun mcpLeaf() = CliDsl.group(
     name = "mcp",
-    description = "Run MCP server over stdin/stdout exposing Egg workflow tools",
-    mixinStandardHelpOptions = false
-  ) { args ->
-    CliArgs.requireArgCount(args, 0, "egg mcp")
-    runEggMcpServer(this)
-  }
+    description = eggMcpHelpText(),
+    children = listOf(mcpToolsGroup()),
+    handler = {
+      runEggMcpServer(this)
+      0
+    },
+    mixinStandardHelpOptions = true
+  )
+
+  private fun mcpToolsGroup() = CliDsl.group(
+    name = "tools",
+    description = "Inspect Egg MCP tools",
+    children = listOf(
+      CliCommandLeaf(
+        name = "list",
+        description = "List implemented MCP tools and parameters",
+        mixinStandardHelpOptions = true,
+        handler = { args ->
+          CliArgs.requireArgCount(args, 0, "egg mcp tools list")
+          output.println(mcpWorkflowCommand().cliMcpToolsListText())
+          0
+        }
+      )
+    )
+  )
+
+  private fun eggMcpHelpText(): String = """
+    Run MCP server over stdin/stdout exposing Egg workflow tools.
+
+    Use `egg mcp tools list` to inspect available MCP tools and their parameters.
+
+    Opencode example:
+    {
+      "mcp": {
+        "egg": {
+          "type": "local",
+          "command": ["/path/to/egg", "mcp"],
+          "cwd": "/path/to/workspace",
+          "enabled": true
+        }
+      }
+    }
+  """.trimIndent()
 
   private fun ghGroup() = CliDsl.group(
     name = "gh",
