@@ -81,6 +81,52 @@ class GhCliGitHubApiTest {
   }
 
   @Test
+  fun `search code includes path matches`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "search", "code", "workflowtests.groovy", "org:knime") to
+          ProcessResult(0, "knime/knime-ai:Jenkinsfile: // see workflowTests.groovy", ""),
+        listOf("gh", "search", "code", "workflowtests.groovy", "in:path", "org:knime") to
+          ProcessResult(0, "knime/jenkins-pipeline-libraries:vars/workflowTests.groovy", "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val output = api.searchCode(java.nio.file.Path.of("."), listOf("workflowtests.groovy"))
+
+    assertEquals(
+      """
+        knime/knime-ai:Jenkinsfile: // see workflowTests.groovy
+        knime/jenkins-pipeline-libraries:vars/workflowTests.groovy
+      """.trimIndent(),
+      output
+    )
+    assertEquals(
+      listOf(
+        listOf("gh", "search", "code", "workflowtests.groovy", "org:knime"),
+        listOf("gh", "search", "code", "workflowtests.groovy", "in:path", "org:knime")
+      ),
+      runner.commands
+    )
+  }
+
+  @Test
+  fun `search code removes duplicate path results`() {
+    val duplicate = "knime/jenkins-pipeline-libraries:vars/workflowTests.groovy"
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "search", "code", "workflowTests.groovy", "org:knime") to ProcessResult(0, duplicate, ""),
+        listOf("gh", "search", "code", "workflowTests.groovy", "in:path", "org:knime") to ProcessResult(0, duplicate, "")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val output = api.searchCode(java.nio.file.Path.of("."), listOf("workflowTests.groovy"))
+
+    assertEquals(duplicate, output)
+  }
+
+  @Test
   fun `thread push returns conflict when fingerprint mismatches`() {
     val threadNodeResponse = """
       {"data":{"node":{"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/A.kt","line":10,"pullRequest":{"number":12,"repository":{"nameWithOwner":"octo/repo"}},"comments":{"nodes":[{"databaseId":101,"body":"root","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","url":"u","author":{"login":"alice"}}]}}}}

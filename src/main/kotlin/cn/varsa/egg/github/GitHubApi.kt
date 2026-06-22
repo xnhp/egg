@@ -942,7 +942,19 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   override fun searchCode(workingDir: Path, queryParts: List<String>): String {
     if (queryParts.isEmpty()) throw CliException("usage: egg gh search <query>", 2)
-    return processRunner.runCaptureOrThrow(workingDir, listOf("gh", "search", "code") + queryParts + listOf("org:knime"))
+    val contentOutput = processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("gh", "search", "code") + queryParts + listOf("org:knime")
+    )
+    val pathOutput = processRunner.runCaptureOrThrow(
+      workingDir,
+      listOf("gh", "search", "code") + queryParts + listOf("in:path", "org:knime")
+    )
+    return (contentOutput.lines() + pathOutput.lines())
+      .map { it.trimEnd() }
+      .filter { it.isNotBlank() }
+      .distinct()
+      .joinToString("\n")
   }
 
   override fun look(workingDir: Path, repo: String, path: String, ref: String?): String {
