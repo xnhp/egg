@@ -3,6 +3,9 @@ package cn.varsa.egg.github
 import cn.varsa.cli.core.CliException
 import cn.varsa.egg.runtime.ProcessResult
 import cn.varsa.egg.runtime.ProcessRunner
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -645,6 +648,22 @@ class GhCliGitHubApiTest {
   }
 
   @Test
+  fun `issue comment posts markdown body via json input file preserving newlines`() {
+    val body = "First paragraph\n\n- item with `code`"
+    val runner = ReadingInputFileRunner()
+    val api = GhCliGitHubApi(runner)
+
+    val output = api.issueComment(
+      java.nio.file.Path.of("."),
+      IssueCommentRequest(repo = "octo/repo", issue = "12", body = body, bodyFile = null)
+    )
+
+    assertEquals("Commented: octo/repo#12", output)
+    assertEquals(listOf("gh", "api", "-X", "POST", "repos/octo/repo/issues/12/comments"), runner.commandPrefix)
+    assertEquals(body, Json.parseToJsonElement(runner.inputFilePayload).jsonObject["body"]!!.jsonPrimitive.content)
+  }
+
+  @Test
   fun `issues push accepts flat entity payload`() {
     val issueViewResponse = """
       {"id":"I_1","number":12,"title":"Old title","body":"Body","state":"OPEN","assignees":[],"labels":[],"milestone":null,"url":"https://example.test/issues/12","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","closedAt":null}
@@ -725,6 +744,18 @@ class GhCliGitHubApiTest {
       commands += command
       return queue.removeFirstOrNull()
         ?: ProcessResult(1, "", "Unexpected command: ${command.joinToString(" ")}")
+    }
+  }
+
+  private class ReadingInputFileRunner : ProcessRunner {
+    lateinit var commandPrefix: List<String>
+    lateinit var inputFilePayload: String
+
+    override fun run(workingDir: java.nio.file.Path, command: List<String>): ProcessResult {
+      val inputIndex = command.indexOf("--input")
+      commandPrefix = command.take(inputIndex)
+      inputFilePayload = java.nio.file.Files.readString(java.nio.file.Path.of(command[inputIndex + 1]))
+      return ProcessResult(0, "{}", "")
     }
   }
 }

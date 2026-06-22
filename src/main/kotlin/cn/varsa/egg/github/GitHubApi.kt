@@ -71,6 +71,13 @@ data class IssuesPushRequest(
   val entityJson: String
 )
 
+data class IssueCommentRequest(
+  val repo: String?,
+  val issue: String,
+  val body: String?,
+  val bodyFile: String?
+)
+
 data class IssuesPushResult(
   val payload: String,
   val exitCode: Int
@@ -96,6 +103,7 @@ interface GitHubApi {
   fun prThreadPush(workingDir: Path, request: ThreadPushRequest): ThreadPushResult
   fun issuesPull(workingDir: Path, request: IssuesPullRequest): String
   fun issuesPush(workingDir: Path, request: IssuesPushRequest): IssuesPushResult
+  fun issueComment(workingDir: Path, request: IssueCommentRequest): String
   fun searchPrs(workingDir: Path, issueKey: String): String
   fun searchCode(workingDir: Path, queryParts: List<String>): String
   fun look(workingDir: Path, repo: String, path: String, ref: String?): String
@@ -648,6 +656,14 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
     }
   }
 
+  override fun issueComment(workingDir: Path, request: IssueCommentRequest): String {
+    val issueNumber = request.issue.toIntOrNull() ?: throw CliException("issue must be an integer", 2)
+    val repo = request.repo ?: resolveRepo(workingDir)
+    val body = resolveBody(workingDir, request.body, request.bodyFile)
+    addIssueComment(workingDir, repo, issueNumber, body)
+    return "Commented: $repo#$issueNumber"
+  }
+
   override fun searchPrs(workingDir: Path, issueKey: String): String {
     if (issueKey.isBlank()) throw CliException("Usage: egg gh search-prs ISSUE_KEY", 2)
     val query = "query(${'$'}q:String!){search(query:${'$'}q,type:ISSUE,first:100){nodes{... on PullRequest{number title headRefName baseRefName url repository{nameWithOwner}}}}}"
@@ -1009,13 +1025,19 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
     listOf("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
   )
 
-  private fun resolveBody(workingDir: Path, request: ReplyRequest): String {
-    request.bodyFile?.let {
+  private fun resolveBody(workingDir: Path, request: ReplyRequest): String = resolveBody(
+    workingDir = workingDir,
+    body = request.body,
+    bodyFile = request.bodyFile
+  )
+
+  private fun resolveBody(workingDir: Path, body: String?, bodyFile: String?): String {
+    bodyFile?.let {
       val file = workingDir.resolve(it).normalize()
       return Files.readString(file)
     }
-    request.body?.let { return it }
-    throw CliException("Provide --body or --body-file", 2)
+    body?.let { return it }
+    throw CliException("Provide --body, --body-file, or stdin", 2)
   }
 
   private fun currentPrIdOrNull(workingDir: Path): String? {

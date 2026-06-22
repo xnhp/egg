@@ -7,6 +7,7 @@ import cn.varsa.egg.git.GitApi
 import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.git.RewordRequest
 import cn.varsa.egg.github.GitHubApi
+import cn.varsa.egg.github.IssueCommentRequest
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
 import cn.varsa.egg.github.IssuesPullRequest
@@ -160,6 +161,34 @@ class EggAppTest {
   }
 
   @Test
+  fun `issue comment reads markdown body from stdin`() {
+    val fakeApi = FakeGitHubApi(issueCommentResult = "Commented: octo/repo#12")
+    val output = BufferedOutput()
+    val body = "First paragraph\n\n- item with `code`"
+    val app = EggApp(
+      gitHubApi = fakeApi,
+      gitApi = NoopGitApi(),
+      output = output,
+      stdinProvider = { body }
+    )
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("gh", "issues", "comment", "--repo", "octo/repo", "12"))
+
+    assertEquals(0, exitCode)
+    assertEquals(listOf("Commented: octo/repo#12"), output.lines())
+    assertEquals(IssueCommentRequest(repo = "octo/repo", issue = "12", body = body, bodyFile = null), fakeApi.lastIssueCommentRequest)
+  }
+
+  @Test
+  fun `issue comment parser supports body option with newlines`() {
+    val parsed = IssueCommentArgsParser.parse(
+      arrayOf("--repo", "octo/repo", "--issue", "12", "--body", "Line 1\n\n- Line 2")
+    )
+
+    assertEquals(IssueCommentRequest(repo = "octo/repo", issue = "12", body = "Line 1\n\n- Line 2", bodyFile = null), parsed)
+  }
+
+  @Test
   fun `thread pull forwards args to github api`() {
     val fakeApi = FakeGitHubApi(threadPullResult = "{\"threads\":[]}")
     val output = BufferedOutput()
@@ -236,13 +265,15 @@ class EggAppTest {
     private val threadPullResult: String = "{\"threads\":[]}",
     private val threadPushResult: ThreadPushResult = ThreadPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0),
     private val issuesPullResult: String = "{\"issues\":[]}",
-    private val issuesPushResult: IssuesPushResult = IssuesPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0)
+    private val issuesPushResult: IssuesPushResult = IssuesPushResult(payload = "{\"status\":\"noop\"}", exitCode = 0),
+    private val issueCommentResult: String = "Commented: octo/repo#1"
   ) : GitHubApi {
     var lastReplyRequest: ReplyRequest? = null
     var lastThreadPullRequest: ThreadPullRequest? = null
     var lastThreadPushRequest: ThreadPushRequest? = null
     var lastIssuesPullRequest: IssuesPullRequest? = null
     var lastIssuesPushRequest: IssuesPushRequest? = null
+    var lastIssueCommentRequest: IssueCommentRequest? = null
 
     override fun currentPrId(workingDir: java.nio.file.Path): String = prId
 
@@ -285,6 +316,11 @@ class EggAppTest {
     override fun issuesPush(workingDir: java.nio.file.Path, request: IssuesPushRequest): IssuesPushResult {
       lastIssuesPushRequest = request
       return issuesPushResult
+    }
+
+    override fun issueComment(workingDir: java.nio.file.Path, request: IssueCommentRequest): String {
+      lastIssueCommentRequest = request
+      return issueCommentResult
     }
 
     override fun searchPrs(workingDir: java.nio.file.Path, issueKey: String): String = "[]"

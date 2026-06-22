@@ -200,6 +200,14 @@ class EggApp(
           output.println(result.payload)
           if (result.exitCode != 0) throw CliException("", result.exitCode)
         }
+      ),
+      outputLeaf(
+        name = "comment",
+        description = "Post a Markdown issue comment from --body, --body-file, or stdin",
+        handler = { wd, args ->
+          val request = IssueCommentArgsParser.parse(args) { stdinProvider() }
+          gitHubApi.issueComment(wd, request)
+        }
       )
     )
   )

@@ -10,6 +10,7 @@ import cn.varsa.egg.ci.CiStatusRequest
 import cn.varsa.egg.commands.EggApp
 import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.git.RewordRequest
+import cn.varsa.egg.github.IssueCommentRequest
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -127,6 +128,29 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
         }
       ),
       handler = { args -> resolveReviewCommentsWorkflow(args) }
+    ),
+    workflowLeaf(
+      name = "comment-on-issue",
+      description = "Post a GitHub issue comment with Markdown newlines preserved.",
+      tool = CliToolBinding(
+        id = "egg_comment_on_issue",
+        title = "Comment on issue",
+        description = "Post a GitHub issue comment with Markdown newlines preserved.",
+        inputSchema = workflowSchema(
+          "repo" to stringProperty("Optional owner/repo override."),
+          "issue" to stringProperty("Issue number."),
+          "body" to stringProperty("Markdown comment body.")
+        ),
+        annotations = ToolAnnotations(destructiveHint = true),
+        decodeArguments = { arguments ->
+          buildArgs {
+            addOptional("--repo", arguments.string("repo"))
+            addOptional("--issue", arguments.string("issue"))
+            addOptional("--body", arguments.string("body"))
+          }
+        }
+      ),
+      handler = { args -> issueCommentWorkflow(args) }
     ),
     workflowLeaf(
       name = "search-github",
@@ -390,6 +414,22 @@ private fun EggApp.resolveReviewCommentsWorkflow(args: Array<String>): String {
       repo = parsed.options["repo"],
       pr = parsed.options["pr"],
       commentIds = parsed.positionals
+    )
+  )
+}
+
+private fun EggApp.issueCommentWorkflow(args: Array<String>): String {
+  val parsed = parseOptions(args)
+  val issue = parsed.options["issue"] ?: parsed.positionals.getOrNull(0)
+    ?: throw CliException("egg_comment_on_issue requires issue", 2)
+  val body = parsed.options["body"] ?: throw CliException("egg_comment_on_issue requires body", 2)
+  return gitHubApi.issueComment(
+    workingDirProvider(),
+    IssueCommentRequest(
+      repo = parsed.options["repo"],
+      issue = issue,
+      body = body,
+      bodyFile = null
     )
   )
 }

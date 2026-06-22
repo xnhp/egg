@@ -6,6 +6,7 @@ import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.git.RewordRequest
 import cn.varsa.egg.github.IssuesPullRequest
 import cn.varsa.egg.github.IssuesPushRequest
+import cn.varsa.egg.github.IssueCommentRequest
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
 import cn.varsa.egg.github.ThreadPullRequest
@@ -184,6 +185,43 @@ object IssuesPushArgsParser {
 
     return IssuesPushRequest(repo = repo, issue = issue, dryRun = dryRun, json = json, entityJson = entityJson)
   }
+}
+
+object IssueCommentArgsParser {
+  fun parse(args: Array<String>, stdinBody: (() -> String)? = null): IssueCommentRequest {
+    var repo: String? = null
+    var issue: String? = null
+    var body: String? = null
+    var bodyFile: String? = null
+
+    var idx = 0
+    while (idx < args.size) {
+      when (val arg = args[idx]) {
+        "--repo" -> repo = optionValue(args, ++idx, "--repo")
+        "--issue" -> issue = optionValue(args, ++idx, "--issue")
+        "--body" -> body = optionValue(args, ++idx, "--body")
+        "--body-file" -> bodyFile = optionValue(args, ++idx, "--body-file")
+        else -> {
+          if (arg.startsWith("--")) throw CliException("Unknown option: $arg", 2)
+          if (issue != null) throw CliException(ISSUE_COMMENT_USAGE, 2)
+          issue = arg
+        }
+      }
+      idx++
+    }
+
+    if (issue == null) throw CliException(ISSUE_COMMENT_USAGE, 2)
+    if (body != null && bodyFile != null) throw CliException("Use either --body or --body-file, not both", 2)
+    return IssueCommentRequest(
+      repo = repo,
+      issue = issue,
+      body = body ?: if (bodyFile == null) stdinBody?.invoke() else null,
+      bodyFile = bodyFile
+    )
+  }
+
+  private const val ISSUE_COMMENT_USAGE =
+    "Usage: egg gh issues comment [--repo owner/name] [--issue <number>] [--body <markdown>|--body-file <path>] [<issue-number>]"
 }
 
 object ChangedPathsArgsParser {
