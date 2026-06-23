@@ -226,6 +226,17 @@ object IssueCommentArgsParser {
 
 object ChangedPathsArgsParser {
   fun parse(args: Array<String>): Pair<Boolean, String?> {
+    return parseChangedArgs(args, "egg git changed-paths [--staged] [<git-range>]")
+  }
+}
+
+object ChangedHunksArgsParser {
+  fun parse(args: Array<String>): Pair<Boolean, String?> {
+    return parseChangedArgs(args, "egg git changed-hunks [--staged] [<git-range>]")
+  }
+}
+
+private fun parseChangedArgs(args: Array<String>, usage: String): Pair<Boolean, String?> {
     var staged = false
     var range: String? = null
 
@@ -235,14 +246,13 @@ object ChangedPathsArgsParser {
         "--staged" -> staged = true
         else -> {
           if (arg.startsWith("--")) throw CliException("Unknown option: $arg", 2)
-          if (range != null) throw CliException("Usage: egg git changed-paths [--staged] [<git-range>]", 2)
+          if (range != null) throw CliException("Usage: $usage", 2)
           range = arg
         }
       }
       idx++
     }
     return staged to range
-  }
 }
 
 object WorktreeMakeArgsParser {

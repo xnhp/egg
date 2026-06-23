@@ -174,6 +174,68 @@ class GitCliApiTest {
   }
 
   @Test
+  fun `changed hunks prints absolute paths with merged new line ranges`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("git", "rev-parse", "--show-toplevel") to ProcessResult(0, "/repo", ""),
+        listOf("git", "diff", "--unified=0", "--no-color") to ProcessResult(
+          0,
+          """
+diff --git a/A.java b/A.java
+--- a/A.java
++++ b/A.java
+@@ -1 +1,2 @@
+@@ -5 +6 @@
+diff --git a/B.java b/B.java
+--- a/B.java
++++ b/B.java
+@@ -3 +3,0 @@
+""".trimIndent(),
+          ""
+        )
+      )
+    )
+    val api = GitCliApi(runner)
+
+    val output = api.changedHunks(java.nio.file.Path.of("."), staged = false, range = null)
+
+    assertEquals("/repo/A.java:1-2,6", output)
+  }
+
+  @Test
+  fun `changed hunks master fetches origin and compares with origin master`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("git", "rev-parse", "--show-toplevel") to ProcessResult(0, "/repo", ""),
+        listOf("git", "fetch", "--quiet", "origin") to ProcessResult(0, "", ""),
+        listOf("git", "diff", "--unified=0", "--no-color", "origin/master") to ProcessResult(
+          0,
+          """
+diff --git a/A.java b/A.java
+--- a/A.java
++++ b/A.java
+@@ -10 +10 @@
+""".trimIndent(),
+          ""
+        )
+      )
+    )
+    val api = GitCliApi(runner)
+
+    val output = api.changedHunks(java.nio.file.Path.of("."), staged = false, range = "master")
+
+    assertEquals("/repo/A.java:10", output)
+    assertEquals(
+      listOf(
+        listOf("git", "rev-parse", "--show-toplevel"),
+        listOf("git", "fetch", "--quiet", "origin"),
+        listOf("git", "diff", "--unified=0", "--no-color", "origin/master")
+      ),
+      runner.commands
+    )
+  }
+
+  @Test
   fun `generate commit message extracts text event payload`() {
     val runner = RecordingProcessRunner(
       fallback = { command ->

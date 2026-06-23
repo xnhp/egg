@@ -72,6 +72,18 @@ class EggAppTest {
   }
 
   @Test
+  fun `changed hunks delegates to git api`() {
+    val output = BufferedOutput()
+    val gitApi = NoopGitApi(changedHunks = "/repo/a.txt:1")
+    val app = EggApp(gitHubApi = FakeGitHubApi(), gitApi = gitApi, output = output)
+
+    val exitCode = CliMain.run(app.commandTree(), arrayOf("git", "changed-hunks"))
+
+    assertEquals(0, exitCode)
+    assertEquals(listOf("/repo/a.txt:1"), output.lines())
+  }
+
+  @Test
   fun `worktree make forwards override flag to git api`() {
     val output = BufferedOutput()
     val gitApi = NoopGitApi()
@@ -332,7 +344,7 @@ class EggAppTest {
     override fun lookWeb(workingDir: java.nio.file.Path, repo: String, path: String, ref: String?) = Unit
   }
 
-  private class NoopGitApi(private val changedPaths: String = "") : GitApi {
+  private class NoopGitApi(private val changedPaths: String = "", private val changedHunks: String = "") : GitApi {
     var lastRewordRequest: RewordRequest? = null
     var lastWorktreeRepoName: String? = null
     var lastWorktreeBranch: String? = null
@@ -349,6 +361,8 @@ class EggAppTest {
     override fun generateCommitMessage(workingDir: java.nio.file.Path): String = ""
 
     override fun changedPaths(workingDir: java.nio.file.Path, staged: Boolean, range: String?): String = changedPaths
+
+    override fun changedHunks(workingDir: java.nio.file.Path, staged: Boolean, range: String?): String = changedHunks
 
     override fun localIgnore(workingDir: java.nio.file.Path, pattern: String): String = ""
 

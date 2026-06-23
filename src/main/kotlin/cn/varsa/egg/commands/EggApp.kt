@@ -338,6 +338,14 @@ class EggApp(
         }
       ),
       outputLeaf(
+        name = "changed-hunks",
+        description = "List changed absolute paths with changed line ranges",
+        handler = { wd, args ->
+          val (staged, range) = ChangedHunksArgsParser.parse(args)
+          gitApi.changedHunks(wd, staged = staged, range = range)
+        }
+      ),
+      outputLeaf(
         name = "local-ignore",
         description = "Add a local ignore pattern",
         handler = { wd, args ->

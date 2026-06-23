@@ -1,6 +1,8 @@
 package cn.varsa.egg.git
 
 import cn.varsa.cli.core.CliException
+import cn.varsa.cli.core.CliLineRange
+import cn.varsa.cli.core.CliPathLineRangeFormat
 import cn.varsa.egg.runtime.ProcessRunner
 import cn.varsa.egg.runtime.runCaptureOrThrow
 import kotlinx.serialization.json.Json
@@ -19,6 +21,7 @@ interface GitApi {
   fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?, override: Boolean)
   fun generateCommitMessage(workingDir: Path): String
   fun changedPaths(workingDir: Path, staged: Boolean, range: String?): String
+  fun changedHunks(workingDir: Path, staged: Boolean, range: String?): String
   fun localIgnore(workingDir: Path, pattern: String): String
   fun localIgnoreEclipse(workingDir: Path): String
   fun aheadFeature(workingDir: Path): String
@@ -43,6 +46,7 @@ data class RewordRequest(
 
 class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
   private val jiraIdRegex = Regex("([A-Z]+-\\d+)")
+  private val diffHunkRegex = Regex("^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@")
   private val defaultAuthorEmail = "benjamin.moser@knime.com"
   private val httpClient: HttpClient = HttpClient.newHttpClient()
 
@@ -135,6 +139,44 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       .asSequence()
       .filter { it.isNotBlank() }
       .joinToString("\n") { "$repo/$it" }
+  }
+
+  override fun changedHunks(workingDir: Path, staged: Boolean, range: String?): String {
+    val repo = Path.of(processRunner.runCaptureOrThrow(workingDir, listOf("git", "rev-parse", "--show-toplevel")))
+    val resolvedRange = resolveChangedPathsRange(workingDir, range)
+    val diffCommand = when {
+      !resolvedRange.isNullOrBlank() -> listOf("git", "diff", "--unified=0", "--no-color", resolvedRange)
+      staged -> listOf("git", "diff", "--unified=0", "--no-color", "--cached")
+      else -> listOf("git", "diff", "--unified=0", "--no-color")
+    }
+
+    val hunksByPath = linkedMapOf<Path, MutableList<CliLineRange>>()
+    var currentPath: Path? = null
+    processRunner.runCaptureOrThrow(workingDir, diffCommand).lineSequence().forEach { line ->
+      when {
+        line.startsWith("+++ ") -> currentPath = parseNewDiffPath(repo, line)
+        line.startsWith("@@ ") -> {
+          val path = currentPath ?: return@forEach
+          val rangeMatch = diffHunkRegex.find(line) ?: return@forEach
+          val start = rangeMatch.groupValues[1].toInt()
+          val count = rangeMatch.groupValues.getOrNull(2)?.takeIf { it.isNotBlank() }?.toInt() ?: 1
+          if (count > 0) {
+            hunksByPath.getOrPut(path) { mutableListOf() }.add(CliLineRange(start, start + count - 1))
+          }
+        }
+      }
+    }
+
+    return hunksByPath.entries.joinToString("\n") { (path, ranges) ->
+      CliPathLineRangeFormat.format(path, CliPathLineRangeFormat.mergeAdjacent(ranges))
+    }
+  }
+
+  private fun parseNewDiffPath(repo: Path, line: String): Path? {
+    val rawPath = line.removePrefix("+++ ").substringBefore('\t')
+    if (rawPath == "/dev/null") return null
+    val repoRelative = rawPath.removePrefix("b/")
+    return repo.resolve(repoRelative)
   }
 
   private fun resolveChangedPathsRange(workingDir: Path, range: String?): String? {
