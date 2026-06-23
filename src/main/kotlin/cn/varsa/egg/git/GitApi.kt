@@ -53,7 +53,7 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
   override fun makeWorktree(workingDir: Path, repoName: String, branch: String, subdir: String?, override: Boolean) {
     val repoPath = Path.of(System.getProperty("user.home"), "repos", repoName)
     val branchDirName = branch.replace('/', '_')
-    val worktreePath = workingDir.resolve("${repoName}_$branchDirName").normalize()
+    val worktreePath = workingDir.resolve("${repoName}_$branchDirName").toAbsolutePath().normalize()
 
     println("[INFO] Fetching latest changes from origin for $repoName at $repoPath")
     processRunner.runCaptureOrThrow(repoPath, listOf("git", "fetch", "--quiet", "origin"))
@@ -81,6 +81,8 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       processRunner.runCaptureOrThrow(worktreePath, listOf("git", "sparse-checkout", "init", "--cone"))
       processRunner.runCaptureOrThrow(worktreePath, listOf("git", "sparse-checkout", "set", subdir))
     }
+
+    println("[INFO] New worktree directory: $worktreePath")
   }
 
   private fun isRegisteredWorktreePath(repoPath: Path, worktreePath: Path): Boolean {

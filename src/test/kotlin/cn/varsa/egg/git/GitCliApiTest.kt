@@ -62,6 +62,7 @@ class GitCliApiTest {
     val output = out.toString()
     assertTrue(output.contains("[INFO] Fetching latest changes from origin for knime-ui"))
     assertTrue(output.contains(repoPath.toString()))
+    assertTrue(output.contains("[INFO] New worktree directory: /tmp/wt/knime-ui_enh_NXT-5000"))
 
     val addCommand = listOf("git", "worktree", "add", "-b", "enh/NXT-5000", "/tmp/wt/knime-ui_enh_NXT-5000", "origin/master")
     val remoteConfigCommand = listOf("git", "config", "branch.enh/NXT-5000.remote", "origin")
