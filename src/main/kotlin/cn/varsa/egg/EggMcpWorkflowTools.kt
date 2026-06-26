@@ -10,7 +10,6 @@ import cn.varsa.egg.ci.CiStatusRequest
 import cn.varsa.egg.commands.EggApp
 import cn.varsa.egg.git.RewordMode
 import cn.varsa.egg.git.RewordRequest
-import cn.varsa.egg.github.IssueCommentRequest
 import cn.varsa.egg.github.ReplyRequest
 import cn.varsa.egg.github.ResolveRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -38,11 +37,11 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
   children = listOf(
     workflowLeaf(
       name = "get-current-pr",
-      description = "Return current PR identity and optional checks/review context.",
+      description = "Return current PR identity and optional checks/review context inferred from the local checkout; prefer the GitHub MCP pull_request_read tool when repo and PR number are already known and raw PR data is needed.",
       tool = CliToolBinding(
         id = "egg_get_current_pr",
         title = "Get current PR",
-        description = "Return current PR identity and optional checks/review context.",
+        description = "Return current PR identity and optional checks/review context inferred from the local checkout; prefer the GitHub MCP pull_request_read tool when repo and PR number are already known and raw PR data is needed.",
         inputSchema = workflowSchema(
           "includeChecks" to booleanProperty("Include current PR check status.", default = true),
           "includeReviewStatus" to booleanProperty("Include current PR review status.", default = true),
@@ -60,11 +59,11 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
     ),
     workflowLeaf(
       name = "get-pr-feedback",
-      description = "Fetch review feedback and optional checks for a PR.",
+      description = "Fetch compact review feedback and optional checks for a PR, defaulting to the current local PR; prefer the GitHub MCP pull_request_read tool for raw review comments, reviews, check runs, or status when explicit repo and PR inputs are available.",
       tool = CliToolBinding(
         id = "egg_get_pr_feedback",
         title = "Get PR feedback",
-        description = "Fetch review feedback and optional checks for a PR.",
+        description = "Fetch compact review feedback and optional checks for a PR, defaulting to the current local PR; prefer the GitHub MCP pull_request_read tool for raw review comments, reviews, check runs, or status when explicit repo and PR inputs are available.",
         inputSchema = workflowSchema(
           "repo" to stringProperty("Optional owner/repo override."),
           "pr" to stringProperty("Optional PR number; defaults to current PR."),
@@ -84,11 +83,11 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
     ),
     workflowLeaf(
       name = "reply-to-review-comments",
-      description = "Reply to review comments.",
+      description = "Batch reply to review comments by GitHub comment IDs and submit related reviews; prefer the GitHub MCP add_reply_to_pull_request_comment tool for single low-level replies when owner, repo, PR, and comment ID are already known.",
       tool = CliToolBinding(
         id = "egg_reply_to_review_comments",
         title = "Reply to review comments",
-        description = "Reply to review comments.",
+        description = "Batch reply to review comments by GitHub comment IDs and submit related reviews; prefer the GitHub MCP add_reply_to_pull_request_comment tool for single low-level replies when owner, repo, PR, and comment ID are already known.",
         inputSchema = workflowSchema(
           "comments" to stringArrayProperty("Review comment ids or refs to reply to."),
           "message" to stringProperty("Reply body."),
@@ -108,11 +107,11 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
     ),
     workflowLeaf(
       name = "resolve-review-comments",
-      description = "Resolve review comments or threads.",
+      description = "Resolve review comments by comment IDs after mapping them to review threads; prefer the GitHub MCP pull_request_review_write tool when review thread node IDs are already available.",
       tool = CliToolBinding(
         id = "egg_resolve_review_comments",
         title = "Resolve review comments",
-        description = "Resolve review comments or threads.",
+        description = "Resolve review comments by comment IDs after mapping them to review threads; prefer the GitHub MCP pull_request_review_write tool when review thread node IDs are already available.",
         inputSchema = workflowSchema(
           "comments" to stringArrayProperty("Review comment ids or refs to resolve."),
           "repo" to stringProperty("Optional owner/repo override."),
@@ -128,75 +127,6 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
         }
       ),
       handler = { args -> resolveReviewCommentsWorkflow(args) }
-    ),
-    workflowLeaf(
-      name = "comment-on-issue",
-      description = "Post a GitHub issue comment with Markdown newlines preserved.",
-      tool = CliToolBinding(
-        id = "egg_comment_on_issue",
-        title = "Comment on issue",
-        description = "Post a GitHub issue comment with Markdown newlines preserved.",
-        inputSchema = workflowSchema(
-          "repo" to stringProperty("Optional owner/repo override."),
-          "issue" to stringProperty("Issue number."),
-          "body" to stringProperty("Markdown comment body.")
-        ),
-        annotations = ToolAnnotations(destructiveHint = true),
-        decodeArguments = { arguments ->
-          buildArgs {
-            addOptional("--repo", arguments.string("repo"))
-            addOptional("--issue", arguments.string("issue"))
-            addOptional("--body", arguments.string("body"))
-          }
-        }
-      ),
-      handler = { args -> issueCommentWorkflow(args) }
-    ),
-    workflowLeaf(
-      name = "search-github",
-      description = "Search GitHub code or PRs within org:knime.",
-      tool = CliToolBinding(
-        id = "egg_search_github",
-        title = "Search GitHub",
-        description = "Search GitHub code or PRs within org:knime.",
-        inputSchema = workflowSchema(
-          "kind" to enumProperty("Search kind.", listOf("code", "pullRequestsByIssue")),
-          "query" to stringProperty("Search query or issue key."),
-          "org" to stringProperty("Optional extra organization qualifier for code search; org:knime is always included."),
-          "limit" to integerProperty("Optional result limit for code search.")
-        ),
-        decodeArguments = { arguments ->
-          buildArgs {
-            add(arguments.string("kind") ?: "code")
-            addOptional(null, arguments.string("query"))
-            addOptional("--org", arguments.string("org"))
-            addOptional("--limit", arguments.int("limit")?.toString())
-          }
-        }
-      ),
-      handler = { args -> searchGithubWorkflow(args) }
-    ),
-    workflowLeaf(
-      name = "read-repo-file",
-      description = "Read a file from a GitHub repository.",
-      tool = CliToolBinding(
-        id = "egg_read_repo_file",
-        title = "Read repo file",
-        description = "Read a file from a GitHub repository.",
-        inputSchema = workflowSchema(
-          "repo" to stringProperty("Repository as owner/repo."),
-          "path" to stringProperty("File path."),
-          "ref" to stringProperty("Optional branch, tag, or commit.")
-        ),
-        decodeArguments = { arguments ->
-          buildArgs {
-            addOptional(null, arguments.string("repo"))
-            addOptional(null, arguments.string("path"))
-            addOptional(null, arguments.string("ref"))
-          }
-        }
-      ),
-      handler = { args -> readRepoFileWorkflow(args) }
     ),
     workflowLeaf(
       name = "get-ci-status",
@@ -416,44 +346,6 @@ private fun EggApp.resolveReviewCommentsWorkflow(args: Array<String>): String {
       commentIds = parsed.positionals
     )
   )
-}
-
-private fun EggApp.issueCommentWorkflow(args: Array<String>): String {
-  val parsed = parseOptions(args)
-  val issue = parsed.options["issue"] ?: parsed.positionals.getOrNull(0)
-    ?: throw CliException("egg_comment_on_issue requires issue", 2)
-  val body = parsed.options["body"] ?: throw CliException("egg_comment_on_issue requires body", 2)
-  return gitHubApi.issueComment(
-    workingDirProvider(),
-    IssueCommentRequest(
-      repo = parsed.options["repo"],
-      issue = issue,
-      body = body,
-      bodyFile = null
-    )
-  )
-}
-
-private fun EggApp.searchGithubWorkflow(args: Array<String>): String {
-  val kind = args.getOrNull(0) ?: "code"
-  val query = args.getOrNull(1).orEmpty()
-  val parsed = parseOptions(args.drop(2).toTypedArray())
-  return when (kind) {
-    "pullRequestsByIssue" -> gitHubApi.searchPrs(workingDirProvider(), query)
-    else -> {
-      val queryParts = buildList {
-        add(query)
-        parsed.options["org"]?.let { add("org:$it") }
-        parsed.options["limit"]?.let { add("--limit"); add(it) }
-      }
-      gitHubApi.searchCode(workingDirProvider(), queryParts)
-    }
-  }
-}
-
-private fun EggApp.readRepoFileWorkflow(args: Array<String>): String {
-  if (args.size !in 2..3) throw CliException("egg_read_repo_file requires repo and path", 2)
-  return gitHubApi.look(workingDirProvider(), repo = args[0], path = args[1], ref = args.getOrNull(2))
 }
 
 private fun EggApp.ciStatusWorkflow(args: Array<String>): String = ciApi.status(
