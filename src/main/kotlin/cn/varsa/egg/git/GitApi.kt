@@ -3,7 +3,9 @@ package cn.varsa.egg.git
 import cn.varsa.cli.core.CliException
 import cn.varsa.cli.core.CliLineRange
 import cn.varsa.cli.core.CliPathLineRangeFormat
+import cn.varsa.egg.runtime.ProcessResult
 import cn.varsa.egg.runtime.ProcessRunner
+import cn.varsa.egg.runtime.requireSuccess
 import cn.varsa.egg.runtime.runCaptureOrThrow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -68,11 +70,11 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
     val forceArgs = if (override) listOf("-f") else emptyList()
 
     when {
-      hasLocalBranch -> processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf(worktreePath.toString(), branch))
-      hasRemoteBranch -> processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), "origin/$branch"))
+      hasLocalBranch -> addWorktreeWithPruneRetry(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf(worktreePath.toString(), branch))
+      hasRemoteBranch -> addWorktreeWithPruneRetry(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), "origin/$branch"))
       else -> {
         val baseRef = defaultBaseRef(repoPath)
-        processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), baseRef))
+        addWorktreeWithPruneRetry(repoPath, listOf("git", "worktree", "add") + forceArgs + listOf("-b", branch, worktreePath.toString(), baseRef))
         configureUpstream(repoPath, branch)
       }
     }
@@ -92,6 +94,25 @@ class GitCliApi(private val processRunner: ProcessRunner) : GitApi {
       .filter { it.startsWith("worktree ") }
       .map { Path.of(it.removePrefix("worktree ").trim()).normalize() }
       .any { it == worktreePath }
+  }
+
+  private fun addWorktreeWithPruneRetry(repoPath: Path, command: List<String>) {
+    val result = processRunner.run(repoPath, command)
+    if (result.exitCode == 0) return
+
+    if (isMissingRegisteredWorktree(result)) {
+      println("[INFO] Pruning stale registered worktrees for $repoPath before retrying worktree creation")
+      processRunner.runCaptureOrThrow(repoPath, listOf("git", "worktree", "prune"))
+      processRunner.runCaptureOrThrow(repoPath, command)
+      return
+    }
+
+    result.requireSuccess("Command failed: ${command.joinToString(" ")}")
+  }
+
+  private fun isMissingRegisteredWorktree(result: ProcessResult): Boolean {
+    val output = listOf(result.stdout, result.stderr).joinToString("\n")
+    return output.contains("missing but already registered worktree")
   }
 
   override fun generateCommitMessage(workingDir: Path): String {

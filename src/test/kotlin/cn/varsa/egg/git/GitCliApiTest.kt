@@ -110,6 +110,51 @@ class GitCliApiTest {
   }
 
   @Test
+  fun `make worktree prunes and retries when registered worktree path is missing`() {
+    val addCommand = listOf("git", "worktree", "add", "/tmp/wt/knime-ui_enh_NXT-4439", "enh/NXT-4439")
+    var addCalls = 0
+    val runner = RecordingProcessRunner(
+      fallback = { command ->
+        when (command) {
+          listOf("git", "show-ref", "--verify", "--quiet", "refs/heads/enh/NXT-4439") -> ProcessResult(0, "", "")
+          listOf("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/enh/NXT-4439") -> ProcessResult(1, "", "")
+          addCommand -> {
+            addCalls += 1
+            if (addCalls == 1) {
+              ProcessResult(
+                128,
+                "",
+                "fatal: '/tmp/wt/knime-ui_enh_NXT-4439' is a missing but already registered worktree;\nuse 'add -f' to override, or 'prune' or 'remove' to clear"
+              )
+            } else {
+              ProcessResult(0, "", "")
+            }
+          }
+          else -> ProcessResult(0, "", "")
+        }
+      }
+    )
+    val api = GitCliApi(runner)
+    val oldOut = System.out
+    val out = ByteArrayOutputStream()
+    try {
+      System.setOut(PrintStream(out))
+      api.makeWorktree(Path("/tmp/wt"), repoName = "knime-ui", branch = "enh/NXT-4439", subdir = null, override = false)
+    } finally {
+      System.setOut(oldOut)
+    }
+
+    assertTrue(out.toString().contains("[INFO] Pruning stale registered worktrees"))
+    val pruneCommand = listOf("git", "worktree", "prune")
+    assertEquals(2, runner.commands.count { it == addCommand })
+    val firstAddIndex = runner.commands.indexOf(addCommand)
+    val pruneIndex = runner.commands.indexOf(pruneCommand)
+    val lastAddIndex = runner.commands.lastIndexOf(addCommand)
+    assertTrue(firstAddIndex < pruneIndex)
+    assertTrue(pruneIndex < lastAddIndex)
+  }
+
+  @Test
   fun `changed paths handles null-delimited output`() {
     val runner = RecordingProcessRunner(
       responses = mapOf(
