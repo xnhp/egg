@@ -88,6 +88,7 @@ class GhCliGitHubApiTest {
     val runner = RecordingProcessRunner(
       responses = mapOf(
         listOf("gh", "auth", "status") to ProcessResult(0, "", ""),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length") to ProcessResult(0, "1", ""),
         listOf("gh", "search", "code", "workflowtests.groovy", "org:knime") to
           ProcessResult(0, "knime/knime-ai:Jenkinsfile: // see workflowTests.groovy", ""),
         listOf("gh", "search", "code", "workflowtests.groovy", "in:path", "org:knime") to
@@ -108,6 +109,7 @@ class GhCliGitHubApiTest {
     assertEquals(
       listOf(
         listOf("gh", "auth", "status"),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length"),
         listOf("gh", "search", "code", "workflowtests.groovy", "org:knime"),
         listOf("gh", "search", "code", "workflowtests.groovy", "in:path", "org:knime")
       ),
@@ -121,6 +123,7 @@ class GhCliGitHubApiTest {
     val runner = RecordingProcessRunner(
       responses = mapOf(
         listOf("gh", "auth", "status") to ProcessResult(0, "", ""),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length") to ProcessResult(0, "1", ""),
         listOf("gh", "search", "code", "workflowTests.groovy", "org:knime") to ProcessResult(0, duplicate, ""),
         listOf("gh", "search", "code", "workflowTests.groovy", "in:path", "org:knime") to ProcessResult(0, duplicate, "")
       )
@@ -151,6 +154,33 @@ class GhCliGitHubApiTest {
   }
 
   @Test
+  fun `search code fails when gh is not sso authorized for knime`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "auth", "status") to ProcessResult(0, "", ""),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length") to
+          ProcessResult(1, "", "Resource protected by organization SAML enforcement")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val error = assertFailsWith<CliException> {
+      api.searchCode(java.nio.file.Path.of("."), listOf("workflowTests.groovy"))
+    }
+
+    assertEquals(1, error.exitCode)
+    assertTrue(error.message.orEmpty().contains("Could not verify GitHub SSO authorization for org:knime"))
+    assertTrue(error.message.orEmpty().contains("Resource protected by organization SAML enforcement"))
+    assertEquals(
+      listOf(
+        listOf("gh", "auth", "status"),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length")
+      ),
+      runner.commands
+    )
+  }
+
+  @Test
   fun `search prs fails when gh is not authenticated`() {
     val runner = RecordingProcessRunner(
       responses = mapOf(
@@ -166,6 +196,32 @@ class GhCliGitHubApiTest {
     assertEquals(1, error.exitCode)
     assertTrue(error.message.orEmpty().contains("Command failed: gh auth status"))
     assertEquals(listOf(listOf("gh", "auth", "status")), runner.commands)
+  }
+
+  @Test
+  fun `search prs fails when gh is not sso authorized for knime`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "auth", "status") to ProcessResult(0, "", ""),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length") to
+          ProcessResult(1, "", "Resource protected by organization SAML enforcement")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val error = assertFailsWith<CliException> {
+      api.searchPrs(java.nio.file.Path.of("."), "UIEXT-123")
+    }
+
+    assertEquals(1, error.exitCode)
+    assertTrue(error.message.orEmpty().contains("Could not verify GitHub SSO authorization for org:knime"))
+    assertEquals(
+      listOf(
+        listOf("gh", "auth", "status"),
+        listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length")
+      ),
+      runner.commands
+    )
   }
 
   @Test

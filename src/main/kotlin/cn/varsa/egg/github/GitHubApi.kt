@@ -666,7 +666,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   override fun searchPrs(workingDir: Path, issueKey: String): String {
     if (issueKey.isBlank()) throw CliException("Usage: egg gh search-prs ISSUE_KEY", 2)
-    requireGhAuthentication(workingDir)
+    requireKnimeSearchAccess(workingDir)
     val query = "query(${'$'}q:String!){search(query:${'$'}q,type:ISSUE,first:100){nodes{... on PullRequest{number title headRefName baseRefName url repository{nameWithOwner}}}}}"
     return processRunner.runCaptureOrThrow(
       workingDir,
@@ -959,7 +959,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   override fun searchCode(workingDir: Path, queryParts: List<String>): String {
     if (queryParts.isEmpty()) throw CliException("usage: egg gh search <query>", 2)
-    requireGhAuthentication(workingDir)
+    requireKnimeSearchAccess(workingDir)
     val contentOutput = processRunner.runCaptureOrThrow(
       workingDir,
       listOf("gh", "search", "code") + queryParts + listOf("org:knime")
@@ -975,8 +975,24 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
       .joinToString("\n")
   }
 
-  private fun requireGhAuthentication(workingDir: Path) {
+  private fun requireKnimeSearchAccess(workingDir: Path) {
     processRunner.runCaptureOrThrow(workingDir, listOf("gh", "auth", "status"))
+    val command = listOf("gh", "api", "orgs/knime/repos?type=private&per_page=1", "--jq", "length")
+    val result = processRunner.run(workingDir, command)
+    if (result.exitCode == 0) return
+
+    val details = listOf(result.stdout, result.stderr)
+      .filter { it.isNotBlank() }
+      .joinToString("\n")
+    val message = buildString {
+      append("Could not verify GitHub SSO authorization for org:knime.")
+      append(" Run `gh auth refresh -h github.com -s repo -s read:org` and authorize the token for the KNIME organization.")
+      if (details.isNotBlank()) {
+        append("\n")
+        append(details)
+      }
+    }
+    throw CliException(message, result.exitCode)
   }
 
   override fun look(workingDir: Path, repo: String, path: String, ref: String?): String {
