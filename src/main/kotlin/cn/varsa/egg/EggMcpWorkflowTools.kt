@@ -154,15 +154,15 @@ internal fun EggApp.mcpWorkflowCommand(): CliCommandGroup = CliCommandGroup(
     ),
     workflowLeaf(
       name = "search-github",
-      description = "Search GitHub code or PRs.",
+      description = "Search GitHub code or PRs within org:knime.",
       tool = CliToolBinding(
         id = "egg_search_github",
         title = "Search GitHub",
-        description = "Search GitHub code or PRs.",
+        description = "Search GitHub code or PRs within org:knime.",
         inputSchema = workflowSchema(
           "kind" to enumProperty("Search kind.", listOf("code", "pullRequestsByIssue")),
           "query" to stringProperty("Search query or issue key."),
-          "org" to stringProperty("Optional organization qualifier for code search."),
+          "org" to stringProperty("Optional extra organization qualifier for code search; org:knime is always included."),
           "limit" to integerProperty("Optional result limit for code search.")
         ),
         decodeArguments = { arguments ->

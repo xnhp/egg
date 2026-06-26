@@ -87,6 +87,7 @@ class GhCliGitHubApiTest {
   fun `search code includes path matches`() {
     val runner = RecordingProcessRunner(
       responses = mapOf(
+        listOf("gh", "auth", "status") to ProcessResult(0, "", ""),
         listOf("gh", "search", "code", "workflowtests.groovy", "org:knime") to
           ProcessResult(0, "knime/knime-ai:Jenkinsfile: // see workflowTests.groovy", ""),
         listOf("gh", "search", "code", "workflowtests.groovy", "in:path", "org:knime") to
@@ -106,6 +107,7 @@ class GhCliGitHubApiTest {
     )
     assertEquals(
       listOf(
+        listOf("gh", "auth", "status"),
         listOf("gh", "search", "code", "workflowtests.groovy", "org:knime"),
         listOf("gh", "search", "code", "workflowtests.groovy", "in:path", "org:knime")
       ),
@@ -118,6 +120,7 @@ class GhCliGitHubApiTest {
     val duplicate = "knime/jenkins-pipeline-libraries:vars/workflowTests.groovy"
     val runner = RecordingProcessRunner(
       responses = mapOf(
+        listOf("gh", "auth", "status") to ProcessResult(0, "", ""),
         listOf("gh", "search", "code", "workflowTests.groovy", "org:knime") to ProcessResult(0, duplicate, ""),
         listOf("gh", "search", "code", "workflowTests.groovy", "in:path", "org:knime") to ProcessResult(0, duplicate, "")
       )
@@ -127,6 +130,42 @@ class GhCliGitHubApiTest {
     val output = api.searchCode(java.nio.file.Path.of("."), listOf("workflowTests.groovy"))
 
     assertEquals(duplicate, output)
+  }
+
+  @Test
+  fun `search code fails when gh is not authenticated`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "auth", "status") to ProcessResult(1, "", "You are not logged into any GitHub hosts")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val error = assertFailsWith<CliException> {
+      api.searchCode(java.nio.file.Path.of("."), listOf("workflowTests.groovy"))
+    }
+
+    assertEquals(1, error.exitCode)
+    assertTrue(error.message.orEmpty().contains("Command failed: gh auth status"))
+    assertEquals(listOf(listOf("gh", "auth", "status")), runner.commands)
+  }
+
+  @Test
+  fun `search prs fails when gh is not authenticated`() {
+    val runner = RecordingProcessRunner(
+      responses = mapOf(
+        listOf("gh", "auth", "status") to ProcessResult(1, "", "You are not logged into any GitHub hosts")
+      )
+    )
+    val api = GhCliGitHubApi(runner)
+
+    val error = assertFailsWith<CliException> {
+      api.searchPrs(java.nio.file.Path.of("."), "UIEXT-123")
+    }
+
+    assertEquals(1, error.exitCode)
+    assertTrue(error.message.orEmpty().contains("Command failed: gh auth status"))
+    assertEquals(listOf(listOf("gh", "auth", "status")), runner.commands)
   }
 
   @Test

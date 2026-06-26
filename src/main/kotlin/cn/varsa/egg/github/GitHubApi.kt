@@ -666,6 +666,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   override fun searchPrs(workingDir: Path, issueKey: String): String {
     if (issueKey.isBlank()) throw CliException("Usage: egg gh search-prs ISSUE_KEY", 2)
+    requireGhAuthentication(workingDir)
     val query = "query(${'$'}q:String!){search(query:${'$'}q,type:ISSUE,first:100){nodes{... on PullRequest{number title headRefName baseRefName url repository{nameWithOwner}}}}}"
     return processRunner.runCaptureOrThrow(
       workingDir,
@@ -958,6 +959,7 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
 
   override fun searchCode(workingDir: Path, queryParts: List<String>): String {
     if (queryParts.isEmpty()) throw CliException("usage: egg gh search <query>", 2)
+    requireGhAuthentication(workingDir)
     val contentOutput = processRunner.runCaptureOrThrow(
       workingDir,
       listOf("gh", "search", "code") + queryParts + listOf("org:knime")
@@ -971,6 +973,10 @@ class GhCliGitHubApi(private val processRunner: ProcessRunner) : GitHubApi {
       .filter { it.isNotBlank() }
       .distinct()
       .joinToString("\n")
+  }
+
+  private fun requireGhAuthentication(workingDir: Path) {
+    processRunner.runCaptureOrThrow(workingDir, listOf("gh", "auth", "status"))
   }
 
   override fun look(workingDir: Path, repo: String, path: String, ref: String?): String {
