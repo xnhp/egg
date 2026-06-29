@@ -1,6 +1,11 @@
 rootProject.name = "egg"
 
-val cliCoreDir = file("/home/ben/repos/cli-core")
-if (cliCoreDir.exists()) {
-  includeBuild(cliCoreDir)
+val cliCorePath = providers.gradleProperty("cliCorePath").orNull
+val cliCoreBuild = listOfNotNull(
+  cliCorePath?.let { file(it) },
+  file("../cli-core")
+).firstOrNull { it.exists() }
+
+if (cliCoreBuild != null) {
+  includeBuild(cliCoreBuild)
 }
